@@ -1,24 +1,27 @@
 # MLPermutationSolver
 
-A machine learning approach to solving permutation sorting problems using beam search and neural guidance.
+A GPU-optimized machine learning approach to solving permutation sorting problems using beam search and neural guidance, implemented with PyTorch.
+
+This project is a spinoff from CayleyPy by Alexander Chervov and collaborators, focused on applying artificial intelligence methods to the mathematical problem of Cayley graph pathfinding. It represents a parallel implementation of the Beam seach for the LRX task (see below) with the same core objectives, with results reported in academic publications e.g. [here](https://arxiv.org/abs/2502.18663).
 
 ## Overview
 
-This project implements a novel approach to solve permutation sorting problems by combining:
+This project implements an approach to solve permutation sorting problems by combining:
 - **Random walk data generation** for training ML models
 - **Beam search algorithms** guided by machine learning predictions
 - **Multiple model architectures** (XGBoost, CatBoost, MLP)
+- **GPU acceleration** with PyTorch for efficient computation
 
-The system can efficiently find optimal solutions for permutation sorting problems using L (left shift), R (right shift), and X (swap) operations.
+The system can efficiently find optimal solutions for permutation sorting problems using for LRX Cayley graphs, with L (left shift), R (right shift), and X (swap) operations.
 
 ## Features
 
-- 🔄 **Multiple random walk algorithms** for data generation
-- 🤖 **ML model integration** (XGBoost, CatBoost, Neural Networks)
-- 🔍 **Beam search solver** with ML guidance
-- 📊 **Comprehensive benchmarking tools**
-- ⚡ **GPU acceleration** support
-- 🧪 **Extensive experiment suite**
+- **Several random walk algorithms** for data generation
+- **ML model integration** (XGBoost, CatBoost, Neural Networks)
+- **Beam search solver** with ML guidance
+- **Comprehensive benchmarking tools**
+- **GPU acceleration** support with PyTorch
+- **Extensive experiment suite**
 
 ## Installation
 
@@ -109,21 +112,19 @@ See [experiments/README.md](experiments/README.md) for detailed descriptions of 
 ## Performance
 
 The system efficiently handles:
-- State sizes up to 34 elements
+- State sizes up to 34+ elements (depending on your machine)
 - GPU memory optimization
 - Sub-second solutions for many problems
 
-## Contributing
+## Research
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
+This work builds upon and contributes to research in AI-based approaches to Cayley graph pathfinding. Results using these methods have been reported in:
+
+- Chervov, A., et al. (2025). "CayleyPy RL: Pathfinding and Reinforcement Learning on Cayley Graphs." [arXiv:2502.18663](https://arxiv.org/abs/2502.18663)
 
 ## License
 
-This project is open source. Please see the license file for details.
+This project is open source.
 
 ## Citation
 
@@ -135,6 +136,13 @@ If you use this work in your research, please cite:
   author={Dolgorukova, Antonina},
   year={2024},
   url={https://github.com/T0chka/MLPermutationSolver}
+}
+
+@article{chervov2025cayleypy,
+  title={CayleyPy RL: Pathfinding and Reinforcement Learning on Cayley Graphs},
+  author={Chervov, A. and Soibelman, A. and Lytkin, S. and others},
+  journal={arXiv preprint arXiv:2502.18663},
+  year={2025}
 }
 ```
 
