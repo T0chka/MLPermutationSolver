@@ -34,7 +34,7 @@ The system can efficiently find optimal solutions for permutation sorting proble
 
 ### Setup
 ```bash
-git clone https://github.com/YourUsername/MLPermutationSolver.git
+git clone https://github.com/T0chka/MLPermutationSolver.git
 cd MLPermutationSolver
 pip install -r requirements.txt
 ```
@@ -86,20 +86,7 @@ The `experiments/` directory contains scripts for:
 - **Profiling** model and solver performance
 - **Validating** solution correctness
 
-Run experiments:
-```bash
-# Benchmark random walk algorithms
-python experiments/benchmark_random_walks.py --state-size 16
-
-# Optimize parameters
-python experiments/optimize_random_walks.py --state-size 8 --test-all
-
-# Profile model performance  
-python experiments/profile_model.py --model-type xgboost
-
-# Profile solver performance
-python experiments/profile_solver.py --state-size 16
-```
+See [experiments/README.md](experiments/README.md) for detailed descriptions of each script and their parameters.
 
 ## Algorithms
 
@@ -147,7 +134,7 @@ If you use this work in your research, please cite:
   title={MLPermutationSolver: Machine Learning Approach to Permutation Sorting},
   author={Dolgorukova, Antonina},
   year={2024},
-  url={https://github.com/YourUsername/MLPermutationSolver}
+  url={https://github.com/T0chka/MLPermutationSolver}
 }
 ```
 
@@ -155,4 +142,4 @@ If you use this work in your research, please cite:
 
 For questions and collaboration:
 - Email: an.dolgorukova@gmail.com
-- GitHub: [@YourUsername](https://github.com/YourUsername) 
+- GitHub: [@T0chka](https://github.com/T0chka) 
