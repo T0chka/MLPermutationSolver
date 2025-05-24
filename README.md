@@ -1,27 +1,16 @@
 # MLPermutationSolver
 
-A GPU-optimized machine learning approach to solving permutation sorting problems using beam search and neural guidance, implemented with PyTorch.
+MLPermutationSolver is a GPU-accelerated PyTorch implementation of machine learning-guided beam search for solving permutation sorting problems on Cayley graphs with LRX generators (L - left shift, R - right shift, and X - swap of the first 2 elements).
 
-This project is a spinoff from CayleyPy by Alexander Chervov and collaborators, focused on applying artificial intelligence methods to the mathematical problem of Cayley graph pathfinding. It represents a parallel implementation of the Beam seach for the LRX task (see below) with the same core objectives, with results reported in academic publications e.g. [here](https://arxiv.org/abs/2502.18663).
+This repo is a spinoff from CayleyPy by Alexander Chervov and collaborators (applying artificial intelligence methods to the mathematical problem of Cayley graph pathfinding). It represents a parallel implementation of the Beam seach results of testing which were reported in academic publications e.g. [here](https://arxiv.org/abs/2502.18663).
 
-## Overview
+## Key Features
 
-This project implements an approach to solve permutation sorting problems by combining:
-- **Random walk data generation** for training ML models
+- **Random walk data generation algorithms** for training ML models
 - **Beam search algorithms** guided by machine learning predictions
 - **Multiple model architectures** (XGBoost, CatBoost, MLP)
-- **GPU acceleration** with PyTorch for efficient computation
-
-The system can efficiently find optimal solutions for permutation sorting problems using for LRX Cayley graphs, with L (left shift), R (right shift), and X (swap) operations.
-
-## Features
-
-- **Several random walk algorithms** for data generation
-- **ML model integration** (XGBoost, CatBoost, Neural Networks)
-- **Beam search solver** with ML guidance
-- **Comprehensive benchmarking tools**
-- **GPU acceleration** support with PyTorch
-- **Extensive experiment suite**
+- **GPU acceleration** (batching, inference, hashing)
+- **Benchmarking, profiling, and evaluation tools**
 
 ## Installation
 
@@ -112,9 +101,8 @@ See [experiments/README.md](experiments/README.md) for detailed descriptions of 
 ## Performance
 
 The system efficiently handles:
-- State sizes up to 34+ elements (depending on your machine)
+- State sizes up to 34+ elements (on modern GPUs)
 - GPU memory optimization
-- Sub-second solutions for many problems
 
 ## Research
 
