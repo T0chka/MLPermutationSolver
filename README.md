@@ -2,7 +2,7 @@
 
 MLPermutationSolver is a GPU-accelerated PyTorch implementation of machine learning-guided beam search for solving permutation sorting problems on Cayley graphs with LRX generators (L - left shift, R - right shift, and X - swap of the first 2 elements).
 
-This repo is a spinoff from CayleyPy by Alexander Chervov and collaborators (applying artificial intelligence methods to the mathematical problem of Cayley graph pathfinding). It represents a parallel implementation of the Beam seach results of testing which were reported in academic publications e.g. [here](https://arxiv.org/abs/2502.18663).
+This repo is a spinoff from [CayleyPy](https://github.com/cayleypy) by Alexander Chervov and collaborators (applying artificial intelligence methods to the mathematical problem of Cayley graph pathfinding). It represents a parallel implementation of the Beam seach results of testing which were reported in academic publications e.g. [here](https://arxiv.org/abs/2502.18663).
 
 ## Key Features
 
