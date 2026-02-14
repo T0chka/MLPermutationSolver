@@ -4,18 +4,18 @@ This folder contains scripts for benchmarking and optimizing random walk impleme
 
 ## benchmark_random_walks.py
 
-Benchmarks different random walk implementations and measures their performance.
+Compares three random walk implementations (first_visit, nbt, beam_nbt) that generate (state, step) training pairs for permutation sorting. For each implementation, measures wall-clock time, GPU memory, number of pairs, unique states, unique state-step pairs, and target value distribution. Produces comparison plots and optionally CSV.
 
 Parameters:
 - `--state-size`: Size of permutation vector (default: 16)
 - `--n-steps`: Number of steps per walk (default: 120)
 - `--n-walks`: Number of random walks (default: 10000)
 - `--n-runs`: Number of benchmark runs (default: 3)
-- `--no-plot`: Disable plotting
-- `--save-results`: Save results to CSV
-- `--sort-by`: Metric to sort results by (time, memory, data_points, etc.)
+- `--no-plot`: Disable plotting (default: plots enabled)
+- `--save-results`: Save results to CSV (default: off)
+- `--sort-by`: Metric to sort results by (default: points_per_second; choices: time, memory, data_points, unique_states, unique_pairs, max_target, target_mean, points_per_second)
 
-Output files:
+Output files (saved to `BS_results/benchmark_random_walks/`):
 - `benchmark_random_walks_performance_size{state_size}_steps{n_steps}_walks{n_walks}.png`: Performance comparison plots
 - `benchmark_random_walks_detailed_size{state_size}_steps{n_steps}_walks{n_walks}.png`: Detailed analysis plots
 - `benchmark_random_walks_size{state_size}_steps{n_steps}_walks{n_walks}.csv`: Detailed results (if --save-results is used)
@@ -32,7 +32,7 @@ Parameters:
 - `--steps`: Comma-separated list of step multipliers (e.g., "0.5,1,2")
 - `--walks`: Comma-separated list of walk counts (e.g., "500,1000,5000")
 
-Output files:
+Output files (saved to `BS_results/optimize_random_walks/`):
 - `optimize_random_walks_size{state_size}_{model_type}.png`: Parameter analysis plots
 - `optimize_best_configurations_size{state_size}_{model_type}.csv`: Best parameters for each implementation
 - `optimize_{implementation}_size{state_size}_{model_type}.csv`: Detailed results for each implementation
@@ -49,7 +49,7 @@ Parameters:
 - `--batch-sizes`: Comma-separated list of batch sizes (default: "1000,10000,50000,100000")
 - `--no-plot`: Disable plotting
 
-Output files:
+Output files (saved to `BS_results/profile_model/`):
 - `profile_model_size{state_size}_{model_type}_{rw_type}.png`: Performance plots
 - `profile_model_size{state_size}_{model_type}_{rw_type}.csv`: Detailed profiling results
 
@@ -67,7 +67,7 @@ Parameters:
 - `--no-plot`: Disable plotting
 - `--verbose`: Enable verbose solver output
 
-Output files:
+Output files (saved to `BS_results/profile_solver/`):
 - `profile_solver_size{state_size}_beam{beam_width}.png`: Performance analysis plots
 - `profile_solver_size{state_size}_beam{beam_width}.csv`: Detailed profiling results
 
@@ -85,9 +85,9 @@ Parameters (configured in script):
 - `history_window_size`: BeamSearchSolver NBT depth
 - `beam_width`: BeamSearchSolver beam width
 
-Output files:
-- `BS_results/rw_nbt_depth_experiments_{base_name}.csv`: Detailed results for each run
-- `BS_results/rw_nbt_depth_stats_{base_name}.csv`: Summary statistics grouped by NBT depth
+Output files (saved to `BS_results/run_rw_nbt_depth_experiment_/`):
+- `rw_nbt_depth_experiments_{base_name}.csv`: Detailed results for each run
+- `rw_nbt_depth_stats_{base_name}.csv`: Summary statistics grouped by NBT depth
 
 ## validate_solutions.py
 

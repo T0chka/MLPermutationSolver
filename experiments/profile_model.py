@@ -2,20 +2,16 @@
 Script to profile model prediction performance with different batch sizes.
 Measures elapsed time, throughput, and memory usage for model inference.
 
-See experiments/README.md for detailed usage instructions.
+Usage: uv run experiments/profile_model.py --state-size 8
 """
 
 import time
+from pathlib import Path
 import torch
 import pandas as pd
 import matplotlib.pyplot as plt
 import argparse
-import sys
-import os
 from typing import Dict, List, Any
-
-# Add parent directory to path for src imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.data.random_walks import (
     create_lrx_moves,
@@ -26,6 +22,8 @@ from src.data.random_walks import (
 from src.models.catboost_model import CatBoostModel
 from src.models.xgboost_model import XGBoostModel
 from src.models.mlp_model import MLPModel
+
+RESULTS_DIR = Path(__file__).resolve().parent / "BS_results" / "profile_model"
 
 def predict_with_batch_size(
     model, 
@@ -105,9 +103,8 @@ def create_performance_plots(
             ax3.set_title('Memory Usage vs Batch Size')
         
         plt.tight_layout()
-        
-        # Save the plot
-        plot_filename = f'profile_model_size{state_size}_{model_type}_{rw_type}.png'
+        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        plot_filename = RESULTS_DIR / f'profile_model_size{state_size}_{model_type}_{rw_type}.png'
         plt.savefig(plot_filename, dpi=300)
         print(f"Performance plots saved to: {plot_filename}")
         
@@ -239,7 +236,8 @@ def main():
     df = print_results_summary(results)
     
     # Save results to CSV
-    csv_filename = f'profile_model_size{args.state_size}_{args.model_type}_{args.rw_type}.csv'
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    csv_filename = RESULTS_DIR / f'profile_model_size{args.state_size}_{args.model_type}_{args.rw_type}.csv'
     df.to_csv(csv_filename, index=False)
     print(f"\nDetailed results saved to: {csv_filename}")
     

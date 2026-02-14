@@ -9,16 +9,13 @@ problems correctly by:
 - Providing validation statistics and error reports
 
 Used for quality control of experiment results to ensure solution correctness.
+
+Usage: uv run experiments/validate_solutions.py
 """
 
 import pandas as pd
 import torch
 import argparse
-import sys
-import os
-
-# Add parent directory to path for src imports (if needed for future extensions)
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def apply_move(state: torch.Tensor, move_type: str) -> torch.Tensor:
     """Apply a single move (X, L, or R) to the state"""

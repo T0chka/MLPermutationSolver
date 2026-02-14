@@ -5,14 +5,14 @@ Tests different history_window_size values for NBT random walks to determine how
 of non-backtracking affects:
 - BeamSearchSolver success rates
 - Solution efficiency (steps, time, memory usage)
+
+Usage: uv run experiments/run_rw_nbt_depth_experiment_.py
 """
 
+from pathlib import Path
 import torch
 import pandas as pd
 from time import time
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.data.random_walks import (
     create_lrx_moves,
@@ -24,8 +24,8 @@ from src.models.xgboost_model import XGBoostModel
 from src.models.mlp_model import MLPModel
 from src.solvers.simple_solver import BeamSearchSolver
 
-# make directory for results
-os.makedirs('experiments/BS_results', exist_ok=True)
+RESULTS_DIR = Path(__file__).resolve().parent / "BS_results" / "run_rw_nbt_depth_experiment_"
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 def factorial(n):
     result = 1
@@ -82,8 +82,8 @@ base_name = (
     f'{EXPERIMENT_PARAMS["model_name"]}'
 )
 
-results_file = f'experiments/BS_results/rw_nbt_depth_experiments_{base_name}.csv'
-stats_file = f'experiments/BS_results/rw_nbt_depth_stats_{base_name}.csv'
+results_file = RESULTS_DIR / f'rw_nbt_depth_experiments_{base_name}.csv'
+stats_file = RESULTS_DIR / f'rw_nbt_depth_stats_{base_name}.csv'
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
@@ -95,7 +95,7 @@ model_classes = {
 
 # Load existing results if available
 existing_results = []
-if os.path.isfile(results_file):
+if results_file.is_file():
     print(f"Loading existing results from {results_file}")
     existing_df = pd.read_csv(results_file)
     existing_results = existing_df.to_dict('records')
@@ -291,7 +291,7 @@ for _, row in test_df.iterrows():
             # Save current result after each run
             results_to_save = pd.DataFrame([result])
             
-            if os.path.isfile(results_file):
+            if results_file.is_file():
                 saved_df = pd.read_csv(results_file)
                 combined_df = pd.concat([saved_df, results_to_save])
                 combined_df.to_csv(results_file, index=False)

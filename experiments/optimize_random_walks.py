@@ -1,14 +1,13 @@
 """
-Script to find optimal parameters for random walks by testing different combinations
+Find optimal parameters for random walks by testing different combinations
 and evaluating model performance on BFS distances.
 
-See README.md for detailed usage instructions and examples.
+Usage: uv run experiments/optimize_random_walks.py
 """
 
-import os
-import sys
 import time
 import argparse
+from pathlib import Path
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -16,9 +15,6 @@ import pandas as pd
 from collections import deque
 from sklearn.metrics import mean_squared_error, r2_score
 from scipy.stats import spearmanr
-
-# Add parent directory to path for src imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import the functions
 from src.data.random_walks import (
@@ -32,6 +28,8 @@ from src.data.random_walks import (
 from src.models.xgboost_model import XGBoostModel
 from src.models.mlp_model import MLPModel
 from src.models.catboost_model import CatBoostModel
+
+RESULTS_DIR = Path(__file__).resolve().parent / "BS_results" / "optimize_random_walks"
 
 def compute_bfs_distances(generators: list, state_size: int) -> dict:
     """
@@ -195,7 +193,8 @@ def plot_results(all_results, steps_range, walks_range, best_configs, y_test, im
     )
     
     # Save the figure
-    plot_filename = f"optimize_random_walks_size{state_size}_{model_type}.png"
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    plot_filename = RESULTS_DIR / f"optimize_random_walks_size{state_size}_{model_type}.png"
     plt.savefig(plot_filename, dpi=300)
     print(f"All plots saved to {plot_filename}")
 
@@ -346,9 +345,8 @@ def main():
         # Convert results to DataFrame for this implementation
         if implementation_results:
             df = pd.DataFrame(implementation_results)
-            
-            # Save results
-            output_file = f"optimize_{name}_size{args.state_size}_{args.model_type}.csv"
+            RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+            output_file = RESULTS_DIR / f"optimize_{name}_size{args.state_size}_{args.model_type}.csv"
             df.to_csv(output_file, index=False)
             print(f"Results saved to {output_file}")
     
@@ -377,7 +375,8 @@ def main():
     print(df_best[['implementation', 'n_steps', 'n_walks', 'test_spearman', 'test_r2', 'test_rmse']])
     
     # Save best configurations
-    best_config_file = f"optimize_best_configurations_size{args.state_size}_{args.model_type}.csv"
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    best_config_file = RESULTS_DIR / f"optimize_best_configurations_size{args.state_size}_{args.model_type}.csv"
     df_best.to_csv(best_config_file, index=False)
     print(f"Best configurations saved to {best_config_file}")
 

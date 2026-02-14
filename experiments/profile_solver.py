@@ -2,23 +2,21 @@
 Script to profile solver performance with different batch sizes and parameters.
 Measures execution time, memory usage, and exploration statistics for BeamSearchSolver.
 
-See experiments/README.md for detailed usage instructions.
+Usage: uv run experiments/profile_solver.py --state-size 8
 """
 
 import torch
+from pathlib import Path
 from time import time
 from datetime import datetime
 import pandas as pd
 import matplotlib.pyplot as plt
 import argparse
-import sys
-import os
 from typing import Dict, List, Any
 
-# Add parent directory to path for src imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from src.solvers.simple_solver import BeamSearchSolver
+
+RESULTS_DIR = Path(__file__).resolve().parent / "BS_results" / "profile_solver"
 
 class DummyModel:
     """Dummy model for solver guidance that returns zeros for all predictions."""
@@ -148,9 +146,8 @@ def create_performance_plots(
         
         plt.suptitle(f'Solver Performance Analysis (size={size}, beam_width={beam_width})', fontsize=16)
         plt.tight_layout()
-        
-        # Save the plot
-        plot_filename = f'profile_solver_size{size}_beam{beam_width}.png'
+        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        plot_filename = RESULTS_DIR / f'profile_solver_size{size}_beam{beam_width}.png'
         plt.savefig(plot_filename, dpi=300)
         print(f"Performance plots saved to: {plot_filename}")
         
@@ -277,7 +274,8 @@ def main():
     df = print_results_summary(results)
     
     # Save results to CSV
-    csv_filename = f'profile_solver_size{args.state_size}_beam{beam_width}.csv'
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    csv_filename = RESULTS_DIR / f'profile_solver_size{args.state_size}_beam{beam_width}.csv'
     df.to_csv(csv_filename, index=False)
     print(f"\nDetailed results saved to: {csv_filename}")
     

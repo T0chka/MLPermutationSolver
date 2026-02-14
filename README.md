@@ -14,21 +14,12 @@ This repo is a spinoff from [CayleyPy](https://github.com/cayleypy) by Alexander
 
 ## Installation
 
-### Requirements
-- Python 3.8+
-- PyTorch
-- NumPy
-- Pandas
-- Scikit-learn
-- XGBoost
-- CatBoost
-- Matplotlib
-
 ### Setup
 ```bash
 git clone https://github.com/T0chka/MLPermutationSolver.git
 cd MLPermutationSolver
-pip install -r requirements.txt
+uv venv
+uv sync
 ```
 
 ## Quick Start

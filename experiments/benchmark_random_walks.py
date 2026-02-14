@@ -2,21 +2,17 @@
 Benchmark script for comparing different random walk implementations.
 Measures execution time, memory usage, and data generation statistics.
 
-See README.md for detailed usage instructions and examples.
+Usage: uv run experiments/benchmark_random_walks.py
 """
 
-import os
-import sys
 import time
 import argparse
+from pathlib import Path
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from collections import defaultdict
 from typing import Dict, List, Any, Callable
-
-# Add parent directory to path for src imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.data.random_walks import (
     create_lrx_moves,
@@ -24,6 +20,8 @@ from src.data.random_walks import (
     nbt_random_walks,
     random_walks_beam_nbt
 )
+
+RESULTS_DIR = Path(__file__).resolve().parent / "BS_results" / "benchmark_random_walks"
 
 def run_benchmark(
     func: Callable,
@@ -322,9 +320,10 @@ def main():
             ])
         
         df = pd.DataFrame(table_data, columns=headers)
-        csv_filename = f'benchmark_random_walks_size{args.state_size}_steps{args.n_steps}_walks{args.n_walks}.csv'
-        df.to_csv(csv_filename, index=False)
-        print(f"Results saved to {csv_filename}")
+        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        csv_path = RESULTS_DIR / f'benchmark_random_walks_size{args.state_size}_steps{args.n_steps}_walks{args.n_walks}.csv'
+        df.to_csv(csv_path, index=False)
+        print(f"Results saved to {csv_path}")
     
     # Plot results if not disabled
     if not args.no_plot:
@@ -414,7 +413,8 @@ def main():
         plt.xticks(rotation=45, ha='right')
         
         plt.tight_layout()
-        performance_plot = f'benchmark_random_walks_performance_size{args.state_size}_steps{args.n_steps}_walks{args.n_walks}.png'
+        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        performance_plot = RESULTS_DIR / f'benchmark_random_walks_performance_size{args.state_size}_steps{args.n_steps}_walks{args.n_walks}.png'
         plt.savefig(performance_plot)
         print(f"Performance comparison plot saved to {performance_plot}")
         
@@ -451,7 +451,7 @@ def main():
             
             plt.tight_layout(rect=[0.02, 0, 1, 0.98])  # Add a bit of padding on the left
             plt.suptitle("Detailed Analysis of Random Walk Implementations", fontsize=16, y=0.995)
-            detailed_plot = f'benchmark_random_walks_detailed_size{args.state_size}_steps{args.n_steps}_walks{args.n_walks}.png'
+            detailed_plot = RESULTS_DIR / f'benchmark_random_walks_detailed_size{args.state_size}_steps{args.n_steps}_walks{args.n_walks}.png'
             plt.savefig(detailed_plot)
             print(f"Detailed visualizations saved to {detailed_plot}")
 
