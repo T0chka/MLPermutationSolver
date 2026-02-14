@@ -37,13 +37,10 @@ def run_solver_test(
     history_window_size: int = 1,
     use_x_rule: bool = False,
     target_radius: int = 0,
-    device: torch.device = None,
+    device: torch.device = torch.device("cuda"),
     verbose: bool = False
 ) -> Dict[str, Any]:
     """Run a single solver test with specified parameters and return results."""
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
     # Create test permutation (reversed sorted state)
     perm = torch.tensor(list(range(size)), device=device)
     perm = perm.flip(0)
@@ -217,8 +214,9 @@ def main():
     parser.add_argument('--verbose', action='store_true', help='Enable verbose solver output')
     args = parser.parse_args()
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required. This script runs only on GPU.")
+    device = torch.device("cuda")
     
     # Parse batch sizes
     batch_sizes = [int(x) for x in args.batch_sizes.split(',')]

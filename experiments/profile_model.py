@@ -34,10 +34,7 @@ def predict_with_batch_size(
     n_samples = X.shape[0]
     results = torch.zeros(n_samples, device=X.device)
     
-    # Reset memory stats before profiling
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-    
+    torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
     
     for i in range(0, n_samples, batch_size):
@@ -49,13 +46,7 @@ def predict_with_batch_size(
         results[i:end_idx] = batch_preds
     
     elapsed_time = time.time() - start_time
-    
-    # Get peak memory usage
-    if torch.cuda.is_available():
-        peak_memory = torch.cuda.max_memory_allocated() / (1024**3)  # GB
-    else:
-        peak_memory = 0
-    
+    peak_memory = torch.cuda.max_memory_allocated() / (1024**3)  # GB
     return {
         'batch_size': batch_size,
         'elapsed_time': elapsed_time,
@@ -89,18 +80,13 @@ def create_performance_plots(
         ax2.grid(True)
         ax2.set_xscale('log')
         
-        # Plot memory usage if available
-        if df['peak_memory_gb'].max() > 0:
-            ax3.plot(df['batch_size'], df['peak_memory_gb'], 'o-', linewidth=2, color='red')
-            ax3.set_xlabel('Batch Size')
-            ax3.set_ylabel('Peak Memory (GB)')
-            ax3.set_title('Memory Usage vs Batch Size')
-            ax3.grid(True)
-            ax3.set_xscale('log')
-        else:
-            ax3.text(0.5, 0.5, 'Memory data not available\n(CPU mode)', 
-                    ha='center', va='center', transform=ax3.transAxes)
-            ax3.set_title('Memory Usage vs Batch Size')
+        # Plot memory usage (GPU only)
+        ax3.plot(df['batch_size'], df['peak_memory_gb'], 'o-', linewidth=2, color='red')
+        ax3.set_xlabel('Batch Size')
+        ax3.set_ylabel('Peak Memory (GB)')
+        ax3.set_title('Memory Usage vs Batch Size')
+        ax3.grid(True)
+        ax3.set_xscale('log')
         
         plt.tight_layout()
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -159,8 +145,9 @@ def main():
     parser.add_argument('--no-plot', action='store_true', help='Disable plotting')
     args = parser.parse_args()
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required. This script runs only on GPU.")
+    device = torch.device("cuda")
     
     # Parse batch sizes
     batch_sizes = [int(x) for x in args.batch_sizes.split(',')]
@@ -211,9 +198,7 @@ def main():
         print(f"Testing batch_size = {batch_size}...", end="", flush=True)
         
         try:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            
+            torch.cuda.empty_cache()
             result = predict_with_batch_size(model, X, batch_size)
             result['model_type'] = args.model_type
             results.append(result)

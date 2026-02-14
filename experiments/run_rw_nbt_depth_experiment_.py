@@ -85,8 +85,9 @@ base_name = (
 results_file = RESULTS_DIR / f'rw_nbt_depth_experiments_{base_name}.csv'
 stats_file = RESULTS_DIR / f'rw_nbt_depth_stats_{base_name}.csv'
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {DEVICE}")
+if not torch.cuda.is_available():
+    raise RuntimeError("CUDA is required. This script runs only on GPU.")
+DEVICE = torch.device("cuda")
 
 model_classes = {
     "xgboost": XGBoostModel,

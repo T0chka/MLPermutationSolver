@@ -13,9 +13,13 @@ Used for quality control of experiment results to ensure solution correctness.
 Usage: uv run experiments/validate_solutions.py
 """
 
+import argparse
 import pandas as pd
 import torch
-import argparse
+
+if not torch.cuda.is_available():
+    raise RuntimeError("CUDA is required. This script runs only on GPU.")
+DEVICE = torch.device("cuda")
 
 def apply_move(state: torch.Tensor, move_type: str) -> torch.Tensor:
     """Apply a single move (X, L, or R) to the state"""
@@ -40,7 +44,7 @@ def apply_solution(state: torch.Tensor, solution: str) -> torch.Tensor:
 
 def is_sorted(state: torch.Tensor) -> bool:
     """Check if state is sorted (0 to n-1)"""
-    return torch.all(state == torch.arange(len(state)))
+    return torch.all(state == torch.arange(len(state), device=state.device))
 
 def check_suboptimal_x_moves(solution: str, initial_perm: torch.Tensor) -> bool:
     """Check if solution contains suboptimal X moves (X when first two elements are already in order)"""
@@ -81,7 +85,7 @@ def validate_solutions(solutions_file: str):
             continue
             
         # Convert permutation string to tensor
-        perm = torch.tensor([int(x) for x in row['permutation'].split(',')])
+        perm = torch.tensor([int(x) for x in row['permutation'].split(',')], device=DEVICE)
         solution = row['solution']
         
         # Check if solution was not found

@@ -220,8 +220,9 @@ def main():
                         help='Comma-separated list of walk counts (e.g., "500,1000,5000")')
     args = parser.parse_args()
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required. This script runs only on GPU.")
+    device = torch.device("cuda")
     
     # Select the implementations to test
     all_implementations = {
