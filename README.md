@@ -24,28 +24,13 @@ uv sync
 
 ## Quick Start
 
-The fastest way to verify that the solver works end-to-end on your machine
-is to run the profiling script with a dummy model. This exercises beam expansion,
-hashing, duplicate filtering, pruning, and termination logic without requiring a trained regressor.
-(do not expect this to solve anithing)
-
-```bash
-uv run experiments/profile_solver.py --state-size 8 --batch-sizes 200000 \
-  --target-radius 0 --history-window 5 --verbose --no-plot
-```
-
-## End-to-end solver demo
-
 To run the full pipeline end-to-end (generate random-walk training data, trains an ML model,
 and then solve target permutations with `BeamSearchSolver` using model-guided scoring)
-use `experiments/run_rw_nbt_depth_experiment_.py`. The default configuration is defined
-in `EXPERIMENT_PARAMS` inside that script. The target permutations are loaded from
-`experiments/test_files/longest_perms.csv` (filtered by `state_size`).
-
-Results are appended after every run, so the experiment is resumable if you re-run it and the output CSV already exists.
+use `experiments/run_pipeline.py` - configurable in the script header.
+Set either a single permutation (`STATE = [1,0,2]`) or read from a file (`STATE = None`, `FILE_PATH`).
 
 ```bash
-uv run experiments/run_rw_nbt_depth_experiment_.py
+uv run experiments/run_pipeline.py
 ```
 
 ## Project Structure
