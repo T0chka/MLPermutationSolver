@@ -3,7 +3,7 @@
 from .models import BaseModel, XGBoostModel, MLPModel, CatBoostModel
 from .solvers.base_solver import BaseSolver
 from .solvers.simple_solver import BeamSearchSolver
-from .data.random_walks import (
+from .data_gen.random_walks import (
     create_lrx_moves,
     first_visit_random_walks,
     nbt_random_walks,
