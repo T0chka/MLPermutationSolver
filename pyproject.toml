@@ -12,6 +12,7 @@ dependencies = [
   "xgboost",
   "catboost",
   "cupy-cuda12x",
+  "numba>=0.63.1",
 ]
 
 [build-system]

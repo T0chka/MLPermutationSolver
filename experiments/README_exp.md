@@ -22,15 +22,31 @@ Output files (saved to `BS_results/benchmark_random_walks/`):
 
 ## optimize_random_walks.py
 
-Finds optimal parameters for random walks by testing different combinations and evaluating model performance.
+Finds optimal parameters (n_steps - walk length and n_walks - number of parallel walks)
+for a chosen random-walk implementation and model. It uses true BFS distances so can be used
+on small state_size only. The best config may not transfer to larger state_size.
+The downstream goal is candidate ranking in the solver, so configs are selected by max
+test Spearman correlation to BFS distances (RMSE/R2 are reported as auxiliary stats).
+
+Note: Full BFS over permutations visits up to n! states. For the current implementation,
+peak memory is approximately 12 * n! bytes. This yields (on RTX3090):
+- n=11 ≈ 0.446 GiB (39,916,800 states, computed in 8 seconds),
+- n=12 ≈ 5.35 GiB (479,001,600 states, computed in 126 seconds),
+- n=13 ≈ 69.6 GiB (6,227,020,800 states, computed in 34 min).
+- n=14 ≈ 974 GiB.
+
+Thus, with 128 GiB RAM, full BFS can fit up to n=13.
+VRAM needed is approximately 8 * n! * (n + 1) bytes. For n=11 this is ≈ 3.57 GiB (fits in 24 GiB),
+but for n=12 it is ≈ 46.4 GiB (does not fit). Therefore, from n >= 12 we must subsample
+a fixed number of test states (BFS_EVAL_STATES = 2_000_000 by default).
 
 Parameters:
 - `--state-size`: Size of permutation vector (default: 8)
 - `--implementation`: Specific implementation to optimize (default: random_walks_beam_nbt)
-- `--test-all`: Test all implementations
+- `--test-all`: Test all implementations (off by default)
 - `--model-type`: Type of model to use (xgboost, mlp, catboost. default: xgboost)
-- `--steps`: Comma-separated list of step multipliers (e.g., "0.5,1,2")
-- `--walks`: Comma-separated list of walk counts (e.g., "500,1000,5000")
+- `--steps`: Comma-separated step multipliers (default: 0.5,0.75,1,1.5,2,3,5)
+- `--walks`: Comma-separated walk counts (default: 100,500,1000,5000,10000,15000,20000)
 
 Output files (saved to `BS_results/optimize_random_walks/`):
 - `optimize_random_walks_size{state_size}_{model_type}.png`: Parameter analysis plots
@@ -39,7 +55,10 @@ Output files (saved to `BS_results/optimize_random_walks/`):
 
 ## profile_model.py
 
-Profiles model prediction performance with different batch sizes, measuring inference time, throughput, and memory usage.
+This script benchmarks model inference speed vs batch size. It generates a
+dataset via one of the random-walk generators, trains a chosen model, then
+measures prediction latency, throughput (samples/sec), and peak CUDA memory
+for multiple batch sizes.
 
 Parameters:
 - `--state-size`: Size of permutation vector (default: 16)
@@ -55,7 +74,8 @@ Output files (saved to `BS_results/profile_model/`):
 
 ## profile_solver.py
 
-Profiles solver performance with different batch sizes, measuring execution time, memory usage, and exploration statistics for BeamSearchSolver.
+Profiles solver performance with different batch sizes, measuring execution time,
+memory usage, and exploration statistics for BeamSearchSolver.
 
 Parameters:
 - `--state-size`: Size of permutation vector (default: 16)
@@ -73,7 +93,8 @@ Output files (saved to `BS_results/profile_solver/`):
 
 ## run_rw_nbt_depth_experiment_.py
 
-Tests the effect of random walks NBT (non-backtracking) depth on solver performance by varying the history_window_size parameter for data generation.
+Tests the effect of random walks NBT (non-backtracking) depth on solver performance
+by varying the history_window_size parameter for data generation.
 
 Parameters (configured in script):
 - `n_runs`: Number of runs per configuration
@@ -91,7 +112,8 @@ Output files (saved to `BS_results/run_rw_nbt_depth_experiment_/`):
 
 ## validate_solutions.py
 
-Validates solution files from permutation sorting experiments by verifying that move sequences actually solve the problems correctly.
+Validates solution files from permutation sorting experiments by verifying
+that move sequences actually solve the problems correctly.
 
 Functions:
 - Applies move sequences (X, L, R) to verify solutions reach sorted state

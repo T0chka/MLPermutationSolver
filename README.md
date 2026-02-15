@@ -24,27 +24,28 @@ uv sync
 
 ## Quick Start
 
-```python
-import torch
-from src import BeamSearchSolver, XGBoostModel, create_lrx_moves, random_walks_beam_nbt
+The fastest way to verify that the solver works end-to-end on your machine
+is to run the profiling script with a dummy model. This exercises beam expansion,
+hashing, duplicate filtering, pruning, and termination logic without requiring a trained regressor.
+(do not expect this to solve anithing)
 
-# Generate training data
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-generators = create_lrx_moves(8)  # For 8-element permutations
-X, y = random_walks_beam_nbt(generators, n_steps=28, n_walks=10000, device=device)
+```bash
+uv run experiments/profile_solver.py --state-size 8 --batch-sizes 200000 \
+  --target-radius 0 --history-window 5 --verbose --no-plot
+```
 
-# Train model
-model = XGBoostModel()
-model.train(X, y)
+## End-to-end solver demo
 
-# Solve a permutation
-start_state = torch.tensor([7, 6, 5, 4, 3, 2, 1, 0], device=device)
-solver = BeamSearchSolver(state_size=8, beam_width=16, max_steps=100, device=device)
-found, steps, solution = solver.solve(start_state, model)
+To run the full pipeline end-to-end (generate random-walk training data, trains an ML model,
+and then solve target permutations with `BeamSearchSolver` using model-guided scoring)
+use `experiments/run_rw_nbt_depth_experiment_.py`. The default configuration is defined
+in `EXPERIMENT_PARAMS` inside that script. The target permutations are loaded from
+`experiments/test_files/longest_perms.csv` (filtered by `state_size`).
 
-print(f"Solution found: {found}")
-print(f"Steps: {steps}")
-print(f"Moves: {solution}")
+Results are appended after every run, so the experiment is resumable if you re-run it and the output CSV already exists.
+
+```bash
+uv run experiments/run_rw_nbt_depth_experiment_.py
 ```
 
 ## Project Structure
@@ -52,12 +53,13 @@ print(f"Moves: {solution}")
 ```
 MLPermutationSolver/
 ├── src/
-│   ├── data/           # Random walk data generation
-│   ├── models/         # ML model implementations  
+│   ├── data/           # Random walk data generation, BFS distances
+│   ├── models/         # ML model implementations
 │   └── solvers/        # Beam search solvers
 ├── experiments/        # Benchmarking and analysis scripts
-├── requirements.txt    # Python dependencies
-└── README.md          # This file
+├── pyproject.toml      # Project config and dependencies (uv)
+├── uv.lock             # Locked dependency versions
+└── README.md           # This file
 ```
 
 ## Experiments
@@ -73,17 +75,74 @@ See [experiments/README.md](experiments/README.md) for detailed descriptions of 
 
 ## Algorithms
 
-### Random Walk Data Generation
-- **First Visit**: Tracks when states are first encountered
-- **Non-Backtracking (NBT)**: Avoids revisiting recent states
-- **Beam NBT**: Efficient batched non-backtracking walks
+### BFS Distances (src/data/bfs_distances.py)
 
-### ML Models
-- **XGBoost**: Gradient boosting for tabular data
-- **CatBoost**: Catboost with GPU support
-- **MLP**: Multi-layer perceptron with PyTorch
+Numba-optimized BFS over the full permutation graph (X, L, R moves). Computes
+exact distances from the identity to every reachable state. Memory-bound:
+max n=13 on RTX 3090 with 24 GB VRAM / 124 GB RAM (~70 GiB for n=13).
+Typical runtimes: n=12 ~2 min, n=13 ~35 min.
 
-### Beam Search Solver
+### Random Walk Data Generation (src/data/random_walks.py)
+
+All dataset generators simulate sequences of states (permutations) starting from
+the identity permutation. They output (X, y), where X is a batch of states and
+y is a step index used as a training target / proxy for "search depth".
+
+1) first_visit_random_walks
+Unconstrained random walks. Repeats are allowed. After sampling, each unique
+state is assigned y = the earliest step at which the state appeared in the
+whole sample ("first-visit time"). Therefore y is a function of state only,
+and (state, y) pairs collapse to unique states. This generator is very fast, but
+can waste a large fraction of the sampling budget on duplicates for larger state_size.
+
+2) nbt_random_walks
+Per-walk self-avoiding (non-backtracking) random walks. Each walk tracks the
+set of states it has visited and forbids transitions to already visited states
+within that walk. If a walk has no valid move, it terminates early. The same
+state may appear at different steps across different walks, so y is not a pure
+function of state. This generator is significantly slower due to per-walk
+history checks.
+
+3) random_walks_beam_nbt
+Beam-style sampling with global non-backtracking in a sliding history window.
+At each step, expand the current beam of states by all moves, discard states
+present in the recent global hash history, then randomly select a new beam of
+size n_walks from the remaining candidates. The target uses an "effective step"
+(counter of successful expansions); when the state-space saturates, effective
+step may stop increasing even if the loop continues. This variant typically
+maximizes unique-state coverage per fixed sampling budget and is much faster
+than per-walk self-avoidance.
+
+
+### ML Models (src/models/)
+The solver treats a permutation state as a feature vector (the raw sequence of
+integers) and learns a scalar score y used as a proxy for "how deep / hard"
+a state is in the search graph.
+
+All models implement BaseModel with four methods:
+- train(X, y): fit on a batch of states X and scalar targets y
+- predict(X): return a 1D tensor of scores for states X
+- save(path), load(path): persist and restore a trained model
+
+1) XGBoostModel (src/models/xgboost_model.py)
+Gradient-boosted trees trained and inferred fully on GPU. PyTorch CUDA tensors
+are converted to CuPy via DLPack, XGBoost uses a GPU DMatrix for training,
+and inference uses inplace_predict().
+Predictions are returned as a CUDA torch.Tensor via DLPack zero-copy.
+
+2) CatBoostModel (src/models/catboost_model.py)
+CatBoostRegressor configured for GPU training. However, this wrapper currently
+moves tensors to CPU (X.cpu().numpy(), y.cpu().numpy()) for both training and
+prediction, then wraps predictions back into a torch tensor.
+
+3) MLPModel (src/models/mlp_model.py)
+A feed-forward neural network (Linear + BatchNorm + ReLU + Dropout blocks)
+trained with Adam and MSE loss. This is a straightforward regression baseline
+that runs on the same device as X. The checkpoint includes both model and
+optimizer state, plus the architecture/training hyperparameters needed to
+reconstruct the network on load.
+
+### Beam Search Solvers (src/solvers/)
 - ML-guided state evaluation
 - Memory-efficient hash tracking
 - GPU-accelerated batch processing
