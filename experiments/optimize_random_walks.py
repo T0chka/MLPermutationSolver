@@ -12,7 +12,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import pandas as pd
-from collections import deque
+
 from sklearn.metrics import mean_squared_error, r2_score
 from scipy.stats import spearmanr
 
@@ -24,34 +24,17 @@ from src.data.random_walks import (
     nbt_random_walks
 )
 
+from src.data.bfs_distances import (
+    compute_bfs_distances, sample_bfs_eval_set
+)
 # Import models
 from src.models.xgboost_model import XGBoostModel
 from src.models.mlp_model import MLPModel
 from src.models.catboost_model import CatBoostModel
 
 RESULTS_DIR = Path(__file__).resolve().parent / "BS_results" / "optimize_random_walks"
-
-def compute_bfs_distances(generators: list, state_size: int) -> dict:
-    """
-    For starting sorted state [0, 1, ..., state_size-1],
-    compute the minimal number of moves (distance) to every reachable state.
-    
-    The allowed moves are defined by the list 'generators', where a generator g
-    defines a move: new_state[i] = state[g[i]].
-    """
-    sorted_state = tuple(range(state_size))
-    distances = {sorted_state: 0}
-    queue = deque([sorted_state])
-    
-    while queue:
-        state = queue.popleft()
-        current_distance = distances[state]
-        for g in generators:
-            new_state = tuple(state[i] for i in g)
-            if new_state not in distances:
-                distances[new_state] = current_distance + 1
-                queue.append(new_state)
-    return distances
+BFS_EVAL_STATES = 2_000_000
+BFS_EVAL_SEED = 0
 
 def run_test(func, generators, n_steps, n_walks, device):
     """Run a single test with given parameters."""
@@ -241,13 +224,22 @@ def main():
     # Generate test data
     generators = create_lrx_moves(args.state_size)
     
-    # Compute BFS distances for ground truth
-    print(f"Computing BFS distances for state size {args.state_size}...")
-    bfs_dists = compute_bfs_distances(generators, args.state_size)
-    X_test = torch.tensor(list(bfs_dists.keys()), device=device, dtype=torch.long)
-    y_test = torch.tensor(list(bfs_dists.values()), device=device, dtype=torch.long)
-    print(f"Generated {len(bfs_dists)} states with BFS distances")
+    # Compute BFS distances for ground truth and sample eval set
+    print(f"Computing BFS distances for state size {args.state_size}", end=" ", flush=True)
+    start_time = time.time()
+    dist = compute_bfs_distances(generators, args.state_size)
+    end_time = time.time()
     
+    X_test_np, y_test_np = sample_bfs_eval_set(dist, args.state_size, BFS_EVAL_STATES, BFS_EVAL_SEED)
+    X_test = torch.as_tensor(X_test_np, device=device, dtype=torch.long)
+    y_test = torch.as_tensor(y_test_np, device=device, dtype=torch.long)
+    
+    print(
+        f"| ✓ {end_time - start_time:.2f} seconds | "
+        f"{dist.size} states | eval set = {X_test.shape[0]} states",
+        flush=True
+    )
+
     # Define parameter ranges to test
     conj_steps = int(args.state_size * (args.state_size - 1) / 2)
     
