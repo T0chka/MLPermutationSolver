@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 from typing import Dict, List, Any, Callable
 
-from src.data.random_walks import (
+from src.data_gen.random_walks import (
     create_lrx_moves,
     first_visit_random_walks,
     nbt_random_walks,

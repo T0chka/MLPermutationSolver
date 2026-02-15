@@ -14,7 +14,7 @@ import torch
 import pandas as pd
 from time import time
 
-from src.data.random_walks import (
+from src.data_gen.random_walks import (
     create_lrx_moves,
     first_visit_random_walks,
     random_walks_beam_nbt

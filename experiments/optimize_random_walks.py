@@ -17,14 +17,14 @@ from sklearn.metrics import mean_squared_error, r2_score
 from scipy.stats import spearmanr
 
 # Import the functions
-from src.data.random_walks import (
+from src.data_gen.random_walks import (
     create_lrx_moves,
     first_visit_random_walks,
     random_walks_beam_nbt,
     nbt_random_walks
 )
 
-from src.data.bfs_distances import (
+from src.data_gen.bfs_distances import (
     compute_bfs_distances, sample_bfs_eval_set
 )
 # Import models
