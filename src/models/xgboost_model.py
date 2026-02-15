@@ -1,7 +1,6 @@
 import torch
 import cupy as cp
 import xgboost as xgb
-import torch.utils.dlpack
 
 from .base_model import BaseModel
 
@@ -22,8 +21,8 @@ class XGBoostModel(BaseModel):
         # XGBoost training parameters
         self.num_boost_round = n_estimators
         self.params = {
-            "tree_method": "gpu_hist",
-            "predictor": "gpu_predictor",
+            "tree_method": "hist",
+            "device": "cuda",
             "eta": learning_rate,
             "verbosity": 1 if verbose else 0,
             "objective": "reg:squarederror",
@@ -32,10 +31,9 @@ class XGBoostModel(BaseModel):
 
     def train(self, X: torch.Tensor, y: torch.Tensor) -> None:
         """Train on GPU using CuPy + DMatrix."""
-        # Convert PyTorch (GPU) to CuPy via DLPack (no CPU copy):
-        # Ensure X,y are contiguous so .to_dlpack() is well-defined.
-        X_cupy = cp.fromDlpack(torch.utils.dlpack.to_dlpack(X.contiguous()))
-        y_cupy = cp.fromDlpack(torch.utils.dlpack.to_dlpack(y.contiguous()))
+        # Convert PyTorch (GPU) to CuPy via DLPack
+        X_cupy = cp.from_dlpack(X.contiguous())
+        y_cupy = cp.from_dlpack(y.contiguous())
 
         # Build DMatrix for training
         dtrain = xgb.DMatrix(X_cupy, label=y_cupy)
@@ -56,14 +54,13 @@ class XGBoostModel(BaseModel):
             raise ValueError("Model not trained. Call .train(...) first.")
 
         # Convert PyTorch CUDA tensor to CuPy array
-        X_cupy = cp.fromDlpack(torch.utils.dlpack.to_dlpack(X.contiguous()))
+        X_cupy = cp.from_dlpack(X.contiguous())
 
         # Predict in-place on GPU; returns a CuPy array
         preds_cupy = self.booster.inplace_predict(X_cupy)
-        # (Make sure X_cupy is 2D: (n_samples, n_features).)
 
         # Convert CuPy -> PyTorch (GPU) via DLPack zero-copy
-        preds_gpu = torch.utils.dlpack.from_dlpack(preds_cupy.toDlpack())
+        preds_gpu = torch.from_dlpack(preds_cupy)
 
         return preds_gpu
 
