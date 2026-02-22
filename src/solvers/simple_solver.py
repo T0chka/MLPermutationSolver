@@ -1,11 +1,14 @@
 import os
 import torch
+import logging
 
 from typing import List, Tuple, Dict, Union
 from time import time
 
 from src.models.base_model import BaseModel
 from src.solvers.base_solver import BaseSolver
+
+logger = logging.getLogger(__name__)
 
 
 class BeamSearchSolver(BaseSolver):
@@ -22,7 +25,7 @@ class BeamSearchSolver(BaseSolver):
         hashes_batch_size: int = 1_000_000,
         filter_batch_size: int = 1_000_000,
         predict_batch_size: int = 1e10,
-        history_window_size: int = 5,  # Store only last N steps of hash history
+        nbt_depth: int = 5,  # Store only last N steps of hash history (NBT depth)
         verbose: int = 0 # 0=WARNING, 1=INFO, 2=DEBUG
     ):
         """Initialize beam search solver."""
@@ -37,7 +40,7 @@ class BeamSearchSolver(BaseSolver):
         self.hashes_batch_size = hashes_batch_size
         self.filter_batch_size = filter_batch_size
         self.predict_batch_size = predict_batch_size
-        self.history_window_size = history_window_size
+        self.nbt_depth = nbt_depth
         
         # Move codes: X=0, L=1, R=2
         self.move_names = ['X', 'L', 'R']  # Keep for logging only
@@ -66,10 +69,10 @@ class BeamSearchSolver(BaseSolver):
         max_hashes_per_step = beam_width * 3  
         
         # Single buffer for all hashes in history
-        if self.history_window_size > 0:
+        if self.nbt_depth > 0:
             # Ensure there's enough space for at least one full step of hashes
             self.max_history_size = max(
-                max_hashes_per_step, self.history_window_size * max_hashes_per_step
+                max_hashes_per_step, self.nbt_depth * max_hashes_per_step
             )
             self.hash_history_buffer = torch.empty(self.max_history_size, dtype=torch.int64, device=device)
         else:
@@ -102,7 +105,7 @@ class BeamSearchSolver(BaseSolver):
             'max_steps': max_steps,
             'use_x_rule': use_x_rule,
             'target_neighborhood_radius': target_neighborhood_radius,
-            'history_window_size': history_window_size,
+            'nbt_depth': nbt_depth,
             'Total hashes in history': 0,
             'Total hashes ever seen': 0,
             'peak_memory_gb': 0,
@@ -168,8 +171,8 @@ class BeamSearchSolver(BaseSolver):
         # Initialize with start state
         start_hash = self._compute_state_hashes(self.start_state.unsqueeze(0))
         
-        # Add initial hash to history if history_window_size > 0
-        if self.history_window_size > 0:
+        # Add initial hash to history if nbt_depth > 0
+        if self.nbt_depth > 0:
             self._update_hash_history(start_hash)
         
         current_states = self.start_state.unsqueeze(0)
@@ -269,7 +272,7 @@ class BeamSearchSolver(BaseSolver):
                 self.total_hashes_ever_seen += step_hashes.size(0)
                 
                 # Only add to history if we're tracking it
-                if self.history_window_size > 0:
+                if self.nbt_depth > 0:
                     self.log_info(f"Before updating history: buffer_size={self.buffer_size}, boundaries={self.step_boundaries}")
                     self._update_hash_history(step_hashes)
                     # Update history stats
@@ -483,28 +486,32 @@ class BeamSearchSolver(BaseSolver):
         """Compute unique hashes for states using vectorized operations."""
         n_states = states.size(0)
         hashes = torch.empty(n_states, dtype=torch.int64, device=self.device)
+        batch_size = self.hashes_batch_size
 
-        for i in range(0, n_states, self.hashes_batch_size):
-            end = min(i + self.hashes_batch_size, n_states)
+        i = 0
+        while i < n_states:
+            end = min(i + batch_size, n_states)
             batch = states[i:end]
-            
             try:
                 hashes[i:end] = torch.sum(
                     batch.to(dtype=torch.int64) * self.hash_vec.unsqueeze(0), dim=1
                 )
-            except torch.cuda.OutOfMemoryError as e:
-                # Print diagnostic information
-                batch_size = end - i
-                print(f"Out of memory error in _compute_state_hashes!")
-                print(f"Trying to compute hashes for {batch_size} states at once")
-                print(f"Total number of states: {n_states}")
-                print(f"Current batch: {i}")
-                print(f"GPU memory allocated: {torch.cuda.memory_allocated() / (1024**3):.2f} GB")
-                print(f"GPU memory reserved: {torch.cuda.memory_reserved() / (1024**3):.2f} GB")
-                
-                # Re-raise the exception after printing diagnostic info
-                raise e
-            
+                i = end
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                new_batch_size = max(10_000, batch_size // 2)
+                if new_batch_size >= batch_size:
+                    logger.error(
+                        "OOM in _compute_state_hashes with batch_size=%s, n_states=%s",
+                        batch_size, n_states,
+                    )
+                    raise
+                logger.warning(
+                    "OOM in _compute_state_hashes: reducing batch %s -> %s (n_states=%s)",
+                    batch_size, new_batch_size, n_states,
+                )
+                self.hashes_batch_size = new_batch_size
+                batch_size = new_batch_size
         return hashes
     
     def _get_unique_states(self, states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -523,20 +530,30 @@ class BeamSearchSolver(BaseSolver):
         
         # Compute hash for each state using our precomputed hash vector
         hashes = self._compute_state_hashes(states)
-        
+        n = hashes.size(0)
+
         # Sort hashes to identify unique elements
         sorted_hashes, sort_indices = torch.sort(hashes)
-        
-        # Create mask for unique elements (first element and elements different from previous)
-        mask = torch.ones(sorted_hashes.size(0), dtype=torch.bool, device=self.device)
+        mask = torch.ones(n, dtype=torch.bool, device=self.device)
         mask[1:] = sorted_hashes[1:] != sorted_hashes[:-1]
-        
-        # Get indices of unique elements in original tensor
-        unique_indices = sort_indices[mask]
-        
-        # Get unique states
-        unique_states = states[unique_indices]
-        
+        unique_indices = sort_indices[mask].clone()
+        num_unique = unique_indices.size(0)
+
+        # Free intermediates before allocating unique_states to reduce peak memory
+        del hashes, sorted_hashes, sort_indices, mask
+        torch.cuda.empty_cache()
+
+        # Build unique_states: copy in chunks to avoid OOM on large single index
+        unique_states = torch.empty(
+            (num_unique, states.size(1)),
+            dtype=states.dtype,
+            device=self.device,
+        )
+        copy_batch = self.hashes_batch_size
+        for start in range(0, num_unique, copy_batch):
+            end = min(start + copy_batch, num_unique)
+            unique_states[start:end] = states[unique_indices[start:end]]
+
         return unique_states, unique_indices
 
     def _apply_moves(self, state: torch.Tensor, moves: Union[torch.Tensor, int]) -> torch.Tensor:
@@ -817,7 +834,7 @@ class BeamSearchSolver(BaseSolver):
         self.log_info(f"Max steps: {self.search_stats['max_steps']}")
         self.log_info(f"X rule enabled: {self.search_stats['use_x_rule']}")
         self.log_info(f"Target neighborhood radius: {self.search_stats['target_neighborhood_radius']}")
-        self.log_info(f"History window size: {self.search_stats['history_window_size']}")
+        self.log_info(f"NBT depth: {self.search_stats['nbt_depth']}")
         if self.search_stats['pruning_steps'] > 0:
             self.log_info(f"Pruning statistics:")
             self.log_info(f"  Total states pruned: {self.search_stats['pruned_states_total']}")
@@ -830,7 +847,7 @@ class BeamSearchSolver(BaseSolver):
 
     def _update_hash_history(self, new_hashes):
         """Add new hashes to circular buffer."""
-        if self.history_window_size <= 0:
+        if self.nbt_depth <= 0:
             self.step_boundaries.clear()
             self.buffer_size = 0
             self.buffer_head = 0
@@ -857,32 +874,54 @@ class BeamSearchSolver(BaseSolver):
         self.step_boundaries.append((step_start, n_hashes))
         self.buffer_size = min(self.buffer_size + n_hashes, self.max_history_size)
 
-        while len(self.step_boundaries) > self.history_window_size:
+        while len(self.step_boundaries) > self.nbt_depth:
             old_start, old_count = self.step_boundaries.pop(0)
             self.buffer_size = max(0, self.buffer_size - old_count)
 
     def _check_history(self, state_hashes):
-        """Check if hashes have been seen in history."""
-        # If history window size is 0 or buffer is empty, nothing is in history
-        if self.history_window_size == 0 or self.buffer_size == 0:
-            return torch.zeros(state_hashes.size(0), dtype=torch.bool, device=self.device)
-        
-        # Unified approach for all positive history window sizes
-        is_in_history = torch.zeros(state_hashes.size(0), dtype=torch.bool, device=self.device)
-        
-        # Process each step in history window
-        for start_idx, count in self.step_boundaries:
-            end_idx = start_idx + count
-            
-            if end_idx <= self.max_history_size:
-                # linear case
-                is_in_history |= torch.isin(state_hashes, self.hash_history_buffer[start_idx:end_idx])
-            else:
-                # circular transition
-                first_part = self.max_history_size - start_idx
-                second_part = count - first_part
-                
-                is_in_history |= torch.isin(state_hashes, self.hash_history_buffer[start_idx:])
-                is_in_history |= torch.isin(state_hashes, self.hash_history_buffer[:second_part])
-        
+        """Check if hashes have been seen in history. Processes in batches to avoid OOM."""
+        n = state_hashes.size(0)
+        if self.nbt_depth == 0 or self.buffer_size == 0:
+            return torch.zeros(n, dtype=torch.bool, device=self.device)
+
+        is_in_history = torch.zeros(n, dtype=torch.bool, device=self.device)
+        batch_size = self.hashes_batch_size
+        i = 0
+
+        while i < n:
+            end = min(i + batch_size, n)
+            chunk = state_hashes[i:end]
+            try:
+                chunk_in_history = torch.zeros(
+                    chunk.size(0), dtype=torch.bool, device=self.device
+                )
+                for start_idx, count in self.step_boundaries:
+                    end_idx = start_idx + count
+                    if end_idx <= self.max_history_size:
+                        chunk_in_history |= torch.isin(
+                            chunk,
+                            self.hash_history_buffer[start_idx:end_idx],
+                        )
+                    else:
+                        first_part = self.max_history_size - start_idx
+                        second_part = count - first_part
+                        chunk_in_history |= torch.isin(
+                            chunk, self.hash_history_buffer[start_idx:]
+                        )
+                        chunk_in_history |= torch.isin(
+                            chunk, self.hash_history_buffer[:second_part]
+                        )
+                is_in_history[i:end] = chunk_in_history
+                i = end
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                new_batch = max(5_000, batch_size // 2)
+                if new_batch >= batch_size:
+                    raise
+                logger.warning(
+                    "OOM in _check_history: reducing batch %s -> %s (n=%s)",
+                    batch_size, new_batch, n,
+                )
+                self.hashes_batch_size = new_batch
+                batch_size = new_batch
         return is_in_history
