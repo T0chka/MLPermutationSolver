@@ -7,6 +7,7 @@ Usage: uv run experiments/run_pipeline.py
 
 from pathlib import Path
 from time import time
+import warnings
 import torch
 import pandas as pd
 
@@ -19,6 +20,7 @@ from src.models.catboost_model import CatBoostModel
 from src.models.xgboost_model import XGBoostModel
 from src.models.mlp_model import MLPModel
 from src.solvers.simple_solver import BeamSearchSolver
+from src.utils import estimate_gpu_limits
 
 # =============================================================================
 # CONFIGURATION — edit these
@@ -30,20 +32,21 @@ STATE = None #[1, 0, 2, 5, 4, 3]
 
 # Option B: read from file (columns: n, permutation). Set STATE = None above.
 FILE_PATH = Path(__file__).parent / "test_files" / "longest_perms.csv"
-N_RANGE = [20]
+N_RANGE = [28]
 
 # Pipeline parameters
+N_RUNS = 10  # Full re-runs per target (new data each time)
 N_WALKS = 10000
 RW_TYPE = "beam_nbt"  # "beam_nbt" | "first_visit"
 MODEL_NAME = "xgboost"  # "xgboost" | "catboost" | "mlp"
-NBT_DEPTH = 2  # history_window_size for beam_nbt
+RW_NBT_DEPTH = 2  # NBT depth for random walks (beam_nbt)
 
 # Solver parameters
-BEAM_WIDTH = 2**15
+BEAM_WIDTH = 2**18
 MAX_STEPS_MULTIPLIER = 10
 USE_X_RULE = False
 TARGET_NEIGHBORHOOD_RADIUS = 15
-HISTORY_WINDOW_SIZE = 2
+BS_NBT_DEPTH = 2  # NBT depth for beam search
 VERBOSE = 0
 
 # Batch sizes (GPU memory tuning)
@@ -97,9 +100,14 @@ def load_targets():
     return targets
 
 
+def conj_length(n: int) -> int:
+    """Conjugation length: n - (n-1)/2 (integer)."""
+    return int(n * (n - 1) / 2)
+
+
 def run_pipeline(n: int, perm: torch.Tensor, perm_str: str) -> dict:
     """Generate data, train model, solve. Returns result dict."""
-    conj_steps = n * (n - 1) // 2
+    conj_steps = conj_length(n)
     max_steps = int(conj_steps * MAX_STEPS_MULTIPLIER)
     generators = create_lrx_moves(n)
     rw_fun = RW_FUNCTIONS[RW_TYPE]
@@ -111,7 +119,7 @@ def run_pipeline(n: int, perm: torch.Tensor, perm_str: str) -> dict:
             generators,
             n_steps=conj_steps,
             n_walks=N_WALKS,
-            history_window_size=NBT_DEPTH,
+            nbt_depth=RW_NBT_DEPTH,
             device=DEVICE,
         )
     else:
@@ -126,17 +134,34 @@ def run_pipeline(n: int, perm: torch.Tensor, perm_str: str) -> dict:
     train_time = time() - t0
     torch.cuda.empty_cache()
 
+    # Cap beam and batch sizes to avoid OOM
+    limits = estimate_gpu_limits(n, DEVICE)
+    beam_width = min(BEAM_WIDTH, limits["max_beam_width"])
+    hashes_batch = min(HASHES_BATCH_SIZE, limits["hashes_batch_size"])
+    filter_batch = min(FILTER_BATCH_SIZE, limits["filter_batch_size"])
+    predict_batch = min(PREDICT_BATCH_SIZE, limits["predict_batch_size"])
+    if beam_width < BEAM_WIDTH:
+        warnings.warn(
+            f"BEAM_WIDTH {BEAM_WIDTH} exceeds GPU limit; using {beam_width} "
+            f"(max_beam_width from estimate_gpu_limits)."
+        )
+    if hashes_batch < HASHES_BATCH_SIZE or filter_batch < FILTER_BATCH_SIZE:
+        warnings.warn(
+            f"Batch sizes capped by GPU memory: hashes={hashes_batch}, "
+            f"filter={filter_batch}, predict={predict_batch}"
+        )
+
     # Solve
     solver = BeamSearchSolver(
         state_size=n,
-        beam_width=BEAM_WIDTH,
+        beam_width=beam_width,
         max_steps=max_steps,
         use_x_rule=USE_X_RULE,
         target_neighborhood_radius=TARGET_NEIGHBORHOOD_RADIUS,
-        hashes_batch_size=HASHES_BATCH_SIZE,
-        filter_batch_size=FILTER_BATCH_SIZE,
-        predict_batch_size=PREDICT_BATCH_SIZE,
-        history_window_size=HISTORY_WINDOW_SIZE,
+        hashes_batch_size=hashes_batch,
+        filter_batch_size=filter_batch,
+        predict_batch_size=predict_batch,
+        nbt_depth=BS_NBT_DEPTH,
         verbose=VERBOSE,
         device=DEVICE,
     )
@@ -150,11 +175,25 @@ def run_pipeline(n: int, perm: torch.Tensor, perm_str: str) -> dict:
         "success": found,
         "solution": solution if found else "Not found",
         "steps": steps,
+        "beam_width": beam_width,
         "data_time": data_time,
         "train_time": train_time,
         "solve_time": solve_time,
         "peak_memory_gb": solver.search_stats.get("peak_memory_gb", 0),
     }
+
+
+def _rw_type_str() -> str:
+    if RW_TYPE == "beam_nbt":
+        return f"beam_nbt depth={RW_NBT_DEPTH} walks={N_WALKS}"
+    return f"first_visit walks={N_WALKS}"
+
+
+def _bs_type_str() -> str:
+    return (
+        f"use_x={USE_X_RULE}, radius={TARGET_NEIGHBORHOOD_RADIUS}, "
+        f"nbt_depth={BS_NBT_DEPTH}, mult={MAX_STEPS_MULTIPLIER}"
+    )
 
 
 def main():
@@ -163,26 +202,58 @@ def main():
         print("No permutations to solve.")
         return
 
-    print(f"Solving {len(targets)} permutation(s)")
-    print(f"Config: rw={RW_TYPE}, model={MODEL_NAME}, beam={BEAM_WIDTH}")
-    print("-" * 60)
+    rw_str = _rw_type_str()
+    bs_str = _bs_type_str()
 
-    results = []
+    table_rows = []
     for i, (n, perm, perm_str) in enumerate(targets):
-        perm_display = perm_str if len(perm_str) <= 50 else perm_str[:47] + "..."
-        print(f"\n[{i+1}/{len(targets)}] n={n} perm={perm_display}")
-        r = run_pipeline(n, perm, perm_str)
-        results.append(r)
-        print(
-            f"  {'OK' if r['success'] else 'FAIL'} | steps={r['steps']} | "
-            f"solve={r['solve_time']:.2f}s | mem={r['peak_memory_gb']:.2f}GB"
+        run_results = []
+        first_r = None
+        for run_idx in range(N_RUNS):
+            r = run_pipeline(n, perm, perm_str)
+            if first_r is None:
+                first_r = r
+            total_time = r["data_time"] + r["train_time"] + r["solve_time"]
+            run_results.append({
+                "success": r["success"],
+                "time": total_time,
+                "steps": r["steps"] if r["success"] else None,
+            })
+        solved = [x for x in run_results if x["success"]]
+        n_success = len(solved)
+        avg_time = (
+            sum(x["time"] for x in solved) / n_success if n_success else float("nan")
         )
-        if r["success"]:
-            print(f"  Solution: {r['solution']}")
+        min_steps = (
+            min(x["steps"] for x in solved) if n_success else float("nan")
+        )
+        table_rows.append({
+            "state_size": n,
+            "conj_length": conj_length(n),
+            "success_rate": n_success / N_RUNS,
+            "runs": N_RUNS,
+            "rw_type": rw_str,
+            "bs_type": bs_str,
+            "beam_width": first_r["beam_width"],
+            "model": MODEL_NAME,
+            "time_avg": avg_time,
+            "min_steps": min_steps,
+        })
 
-    # Summary
-    solved = sum(1 for r in results if r["success"])
-    print(f"\n--- Done: {solved}/{len(results)} solved ---")
+    df = pd.DataFrame(table_rows)
+    df["success_rate"] = df["success_rate"].apply(lambda x: f"{x:.1%}")
+    df["time_avg"] = df["time_avg"].apply(lambda x: "NA" if pd.isna(x) else f"{x:.2f}s")
+    df["min_steps"] = df["min_steps"].apply(lambda x: "NA" if pd.isna(x) else str(int(x)))
+    cols = [
+        "state_size", "conj_length", "min_steps", "success_rate", "runs",
+        "model", "rw_type", "bs_type", "beam_width", "time_avg",
+    ]
+    col_headers = [
+        "state size", "conj length", "min steps", "success rate", "runs",
+        "model", "RW type", "BS type", "beam width", "time (avg)",
+    ]
+    out = df[cols].rename(columns=dict(zip(cols, col_headers)))
+    print(out.to_string(index=False))
 
 
 if __name__ == "__main__":
