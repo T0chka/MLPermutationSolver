@@ -94,16 +94,16 @@ Output files (saved to `BS_results/profile_solver/`):
 ## run_rw_nbt_depth_experiment_.py
 
 Tests the effect of random walks NBT (non-backtracking) depth on solver performance
-by varying the history_window_size parameter for data generation.
+by varying the RW nbt_depth parameter for data generation.
 
 Parameters (configured in script):
 - `n_runs`: Number of runs per configuration
 - `state_size`: Size of permutation
 - `rw_type`: Random walks implementation
 - `n_walks`: Number of random walks for training data
-- `rw_nbt_depths`: List of NBT depth values to test
+- `rw_nbt_depths`: List of RW NBT depth values to test
 - `model_name`: Model type (xgboost, catboost)
-- `history_window_size`: BeamSearchSolver NBT depth
+- `bs_nbt_depth`: BeamSearchSolver NBT depth (fixed)
 - `beam_width`: BeamSearchSolver beam width
 
 Output files (saved to `BS_results/run_rw_nbt_depth_experiment_/`):

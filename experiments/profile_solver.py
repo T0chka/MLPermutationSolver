@@ -34,7 +34,7 @@ def run_solver_test(
     size: int,
     beam_width: int,
     batch_size: int,
-    history_window_size: int = 1,
+    nbt_depth: int = 1,
     use_x_rule: bool = False,
     target_radius: int = 0,
     device: torch.device = torch.device("cuda"),
@@ -57,7 +57,7 @@ def run_solver_test(
         target_neighborhood_radius=target_radius,
         filter_batch_size=batch_size,
         predict_batch_size=batch_size,
-        history_window_size=history_window_size,
+        nbt_depth=nbt_depth,
         device=device,
         verbose=verbose
     )
@@ -84,7 +84,7 @@ def run_solver_test(
         'size': size,
         'beam_width': beam_width,
         'batch_size': batch_size,
-        'history_window_size': history_window_size,
+        'nbt_depth': nbt_depth,
         'use_x_rule': use_x_rule,
         'target_radius': target_radius,
         'max_steps': max_steps,
@@ -176,7 +176,7 @@ def print_results_summary(results: List[Dict[str, Any]]) -> pd.DataFrame:
         common_params = {
             'Size': valid_df.iloc[0]['size'],
             'Beam Width': valid_df.iloc[0]['beam_width'],
-            'History Window': valid_df.iloc[0]['history_window_size'],
+            'BS NBT depth': valid_df.iloc[0]['nbt_depth'],
             'Max Steps': valid_df.iloc[0]['max_steps'],
             'Conjectured Steps': valid_df.iloc[0]['conjectured_steps']
         }
@@ -206,8 +206,9 @@ def main():
     parser.add_argument('--beam-width', type=int, default=None, help='Beam width for search (default: 2^state_size)')
     parser.add_argument('--batch-sizes', type=str, default='10000,50000,100000,500000',
                         help='Comma-separated list of batch sizes to test')
-    parser.add_argument('--history-window', type=int, default=None, 
-                        help='History window size (default: conjectured_steps/5)')
+    parser.add_argument('--bs-nbt-depth', type=int, default=None,
+                        dest='bs_nbt_depth',
+                        help='Beam search NBT depth (default: conjectured_steps/5)')
     parser.add_argument('--use-x-rule', action='store_true', help='Enable X-rule optimization')
     parser.add_argument('--target-radius', type=int, default=0, help='Target neighborhood radius')
     parser.add_argument('--no-plot', action='store_true', help='Disable plotting')
@@ -224,12 +225,12 @@ def main():
     # Calculate derived parameters
     conj_steps = int(args.state_size * (args.state_size - 1) / 2)
     beam_width = args.beam_width if args.beam_width is not None else 2**args.state_size
-    history_window = args.history_window if args.history_window is not None else max(1, int(conj_steps/5))
+    bs_nbt_depth = args.bs_nbt_depth if args.bs_nbt_depth is not None else max(1, int(conj_steps/5))
     
     print(f"Profiling solver with:")
     print(f"  - State size: {args.state_size}")
     print(f"  - Beam width: {beam_width}")
-    print(f"  - History window: {history_window}")
+    print(f"  - BS NBT depth: {bs_nbt_depth}")
     print(f"  - Conjectured steps: {conj_steps}")
     print(f"  - Batch sizes: {batch_sizes}")
     
@@ -242,7 +243,7 @@ def main():
                 size=args.state_size,
                 beam_width=beam_width,
                 batch_size=batch_size,
-                history_window_size=history_window,
+                nbt_depth=bs_nbt_depth,
                 use_x_rule=args.use_x_rule,
                 target_radius=args.target_radius,
                 device=device,
@@ -257,7 +258,7 @@ def main():
                 'size': args.state_size,
                 'beam_width': beam_width,
                 'batch_size': batch_size,
-                'history_window_size': history_window,
+                'nbt_depth': bs_nbt_depth,
                 'use_x_rule': args.use_x_rule,
                 'target_radius': args.target_radius,
                 'elapsed_time': float('inf'),

@@ -1,7 +1,7 @@
 """
 Experiment to test the effect of NBT (non-backtracking) depth on solver performance.
 
-Tests different history_window_size values for NBT random walks to determine how the depth
+Tests different nbt_depth values for NBT random walks to determine how the depth
 of non-backtracking affects:
 - BeamSearchSolver success rates
 - Solution efficiency (steps, time, memory usage)
@@ -34,12 +34,12 @@ def factorial(n):
     return result
 
 EXPERIMENT_PARAMS = {
-    'state_size': 15,
+    'state_size': 25,
     'n_runs': 5,
     'rw_type': "beam_nbt",
     'n_walks': 10000,
     'model_name': "xgboost",
-    'history_window_size': 2,
+    'bs_nbt_depth': 2,  # NBT depth for BeamSearchSolver
     'max_steps_multiplier': 10,
     'use_x_rule': False,
     'target_neighborhood_radius': 15,
@@ -62,18 +62,14 @@ conj_steps = int(
     EXPERIMENT_PARAMS['state_size'] * (EXPERIMENT_PARAMS['state_size'] - 1) / 2
 )
 
-if EXPERIMENT_PARAMS['history_window_size'] != 2:
-    EXPERIMENT_PARAMS['history_window_size'] = int(
-        round(conj_steps * EXPERIMENT_PARAMS['history_window_size'])
-    )
-
-# NBT depths to test
+# NBT depths to test (for random walks)
+BS_NBT_DEPTH = EXPERIMENT_PARAMS['bs_nbt_depth']
 rw_nbt_depths = [2] + [conj_steps * f for f in [0.10, 0.30, 0.50]]
 rw_nbt_depths = sorted(set(int(round(v)) for v in (rw_nbt_depths)))
 
 print("Beam width:", beam_width)
-print("History window size:", EXPERIMENT_PARAMS['history_window_size'])
-print("NBT depths to test:", rw_nbt_depths)
+print("BS NBT depth:", BS_NBT_DEPTH)
+print("RW NBT depths to test:", rw_nbt_depths)
 
 # Make output files names based on experiment parameters
 base_name = (
@@ -144,7 +140,7 @@ for _, row in test_df.iterrows():
                 r['beam_width'] == beam_width and
                 r['target_neighborhood_radius'] == EXPERIMENT_PARAMS['target_neighborhood_radius'] and
                 r['use_x_rule'] == EXPERIMENT_PARAMS['use_x_rule'] and
-                r['history_window_size'] == EXPERIMENT_PARAMS['history_window_size'] and
+                r['bs_nbt_depth'] == BS_NBT_DEPTH and
                 r['permutation'] == row['permutation'] and
                 r['max_steps'] == MAX_STEPS)
         ]
@@ -189,7 +185,7 @@ for _, row in test_df.iterrows():
                 generators, 
                 n_steps=conj_steps, 
                 n_walks=EXPERIMENT_PARAMS['n_walks'], 
-                history_window_size=nbt_depth, 
+                nbt_depth=nbt_depth,
                 device=DEVICE
             )
             data_gen_time = time() - start_time
@@ -218,7 +214,7 @@ for _, row in test_df.iterrows():
                 hashes_batch_size=500_000,
                 filter_batch_size=1_000_000,
                 predict_batch_size=10_000_000,
-                history_window_size=EXPERIMENT_PARAMS['history_window_size'],
+                nbt_depth=BS_NBT_DEPTH,
                 verbose=EXPERIMENT_PARAMS['verbose'],
                 device=DEVICE
             )
@@ -250,7 +246,7 @@ for _, row in test_df.iterrows():
                 'beam_width': beam_width,
                 'target_neighborhood_radius': EXPERIMENT_PARAMS['target_neighborhood_radius'],
                 'use_x_rule': EXPERIMENT_PARAMS['use_x_rule'],
-                'history_window_size': EXPERIMENT_PARAMS['history_window_size'],
+                'bs_nbt_depth': BS_NBT_DEPTH,
                 'max_steps': MAX_STEPS,
                 'run': run,
                 'success': found,
@@ -322,7 +318,7 @@ results_df = pd.DataFrame(results)
 total_time = time() - script_start
 print(f"\nTotal execution time: {total_time:.2f} seconds")
 
-# Calculate statistics grouped by both beam_width and history_window_size
+# Calculate statistics grouped by nbt_depth (RW)
 grouped = results_df.groupby(['nbt_depth'])
 success_rate = grouped['success'].mean() * 100
 num_runs = grouped['run'].nunique()

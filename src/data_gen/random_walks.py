@@ -166,7 +166,7 @@ def random_walks_beam_nbt(
     n_steps: int,
     n_walks: int,
     device: torch.device,
-    history_window_size: int = None,
+    nbt_depth: int = None,
     dtype: str = 'auto',
     verbose: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -174,9 +174,8 @@ def random_walks_beam_nbt(
     Generate non-backtracking random walks from identity permutation.    
     Uses beam search approach where states visited by any trajectory are banned for all.
     """
-    # Set default history depth to full non-backtracking
-    if not history_window_size:
-        history_window_size = n_steps
+    if not nbt_depth:
+        nbt_depth = n_steps
     
     state_size = len(generators[0])
     n_generators = len(generators)
@@ -213,9 +212,9 @@ def random_walks_beam_nbt(
     y[:n_walks] = 0
     
     # Initialize hash history if using non-backtracking
-    if history_window_size > 0:
+    if nbt_depth > 0:
         initial_hash = torch.sum(initial_state.view(-1, state_size) * hash_vector, dim=1)
-        hash_history = initial_hash.expand(n_walks * n_generators, history_window_size).clone()
+        hash_history = initial_hash.expand(n_walks * n_generators, nbt_depth).clone()
         history_index = 0  # Cyclic index for hash storage
     
     # Track effective step count (may differ from loop index due to backtracking avoidance)
@@ -223,7 +222,7 @@ def random_walks_beam_nbt(
     
     if verbose:
         print(f"Starting random walks with {n_walks} walks for {n_steps} steps")
-        print(f"Using device: {device}, state size: {state_size}, history depth: {history_window_size}")
+        print(f"Using device: {device}, state size: {state_size}, history depth: {nbt_depth}")
     
     # Main random walk loop
     for step in range(1, n_steps):
@@ -246,8 +245,8 @@ def random_walks_beam_nbt(
         # 2. Compute hashes for new states
         new_hashes = torch.sum(new_states * hash_vector, dim=1)
         
-        # 3. Handle non-backtracking if history_window_size > 0
-        if history_window_size > 0:
+        # 3. Handle non-backtracking if nbt_depth > 0
+        if nbt_depth > 0:
             # Filter out states that have been visited before
             is_new_mask = ~torch.isin(new_hashes, hash_history.view(-1), assume_unique=False)
             new_state_count = is_new_mask.sum().item()
@@ -276,7 +275,7 @@ def random_walks_beam_nbt(
                     if verbose:
                         print(f"  Warning: No new states found, staying at current states")
         else:
-            # If history_window_size is 0, allow any move (no non-backtracking)
+            # If nbt_depth is 0, allow any move (no non-backtracking)
             effective_step = step
         
         # 4. Randomly select n_walks states from available new states
@@ -293,8 +292,8 @@ def random_walks_beam_nbt(
         X[start_idx:end_idx] = current_states
         
         # 6. Update hash history if using non-backtracking
-        if history_window_size > 0:
-            history_index = (history_index + 1) % history_window_size
+        if nbt_depth > 0:
+            history_index = (history_index + 1) % nbt_depth
             hash_history[:, history_index] = new_hashes
     
     if verbose:

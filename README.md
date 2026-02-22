@@ -56,18 +56,18 @@ The `experiments/` directory contains scripts for:
 - **Profiling** model and solver performance
 - **Validating** solution correctness
 
-See [experiments/README.md](experiments/README.md) for detailed descriptions of each script and their parameters.
+See [experiments/README_exp.md](experiments/README_exp.md) for detailed descriptions of each script and their parameters.
 
 ## Algorithms
 
-### BFS Distances (src/data/bfs_distances.py)
+### BFS Distances (src/data_gen/bfs_distances.py)
 
 Numba-optimized BFS over the full permutation graph (X, L, R moves). Computes
 exact distances from the identity to every reachable state. Memory-bound:
 max n=13 on RTX 3090 with 24 GB VRAM / 124 GB RAM (~70 GiB for n=13).
 Typical runtimes: n=12 ~2 min, n=13 ~35 min.
 
-### Random Walk Data Generation (src/data/random_walks.py)
+### Random Walk Data Generation (src/data_gen/random_walks.py)
 
 All dataset generators simulate sequences of states (permutations) starting from
 the identity permutation. They output (X, y), where X is a batch of states and
