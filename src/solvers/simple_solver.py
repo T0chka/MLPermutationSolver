@@ -2,11 +2,12 @@ import os
 import torch
 import logging
 
-from typing import List, Tuple, Dict, Union
+from typing import List, Tuple, Dict, Union, Optional
 from time import time
 
 from src.models.base_model import BaseModel
 from src.solvers.base_solver import BaseSolver
+from src.puzzles import PuzzleSpec
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,7 @@ class BeamSearchSolver(BaseSolver):
         self,
         state_size: int,
         device: torch.device,
+        puzzle_spec: PuzzleSpec,
         beam_width: int,
         max_steps: int,
         use_x_rule: bool = False,
@@ -42,16 +44,17 @@ class BeamSearchSolver(BaseSolver):
         self.predict_batch_size = predict_batch_size
         self.nbt_depth = nbt_depth
         
-        # Move codes: X=0, L=1, R=2
-        self.move_names = ['X', 'L', 'R']  # Keep for logging only
-        self.MOVE_X = 0
-        self.MOVE_L = 1
-        self.MOVE_R = 2
-        
-        # Pre-compute indices for state transformations in _bulk_state_transform
-        self.idx_x = torch.tensor([1, 0] + list(range(2, state_size)), device=device)
-        self.idx_l = torch.roll(torch.arange(state_size, device=device), -1)
-        self.idx_r = torch.roll(torch.arange(state_size, device=device), 1)
+        self.puzzle_spec = puzzle_spec
+
+        self.move_names = list(puzzle_spec.move_names)
+        self.move_indices = puzzle_spec.move_indices
+        self.inverse_moves = puzzle_spec.inverse_moves
+        self.solved_state = puzzle_spec.solved_state
+
+        self.n_moves = int(self.move_indices.size(0))
+        self.x_move_code = (
+            self.move_names.index("X") if "X" in self.move_names else None
+        )
         
         # Pre-compute hash vector for efficient state hashing
         max_int = int(2**62)
@@ -64,9 +67,7 @@ class BeamSearchSolver(BaseSolver):
         ).contiguous()
         
         # Get solved state as sorted permutation
-        self.solved_state = torch.arange(self.state_size, device=device, dtype=torch.int8)
-        
-        max_hashes_per_step = beam_width * 3  
+        max_hashes_per_step = beam_width * self.n_moves
         
         # Single buffer for all hashes in history
         if self.nbt_depth > 0:
@@ -190,7 +191,7 @@ class BeamSearchSolver(BaseSolver):
             
             # 1. Expand all states at once - use GPU efficiently
             next_states, next_moves = self._bulk_state_transform(current_states)
-            parents = torch.arange(len(current_states), device=self.device).repeat(3)
+            parents = torch.arange(len(current_states), device=self.device).repeat(self.n_moves)
             
             self._track_memory()  # Track memory after expansion
             
@@ -357,8 +358,8 @@ class BeamSearchSolver(BaseSolver):
         valid_moves = is_new
 
         # Filter states based on rules (X rule, etc.)
-        if self.use_x_rule:
-            is_x_move = next_moves == 0
+        if self.use_x_rule and self.x_move_code is not None:
+            is_x_move = next_moves == self.x_move_code
             
             # Optimized vectorized operation
             parent_indices = parents % current_states.size(0)
@@ -460,26 +461,22 @@ class BeamSearchSolver(BaseSolver):
         
         return pruned_states, pruned_parents, pruned_moves
 
-    def _bulk_state_transform(self, states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Apply all possible moves to states efficiently, return expanded states and move types."""
+    def _bulk_state_transform(
+        self, states: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Apply all moves. Returns (states, move_codes)."""
         n_states = states.size(0)
-        
-        # Pre-allocate result tensor
-        result = torch.empty((n_states * 3, self.state_size), dtype=torch.int8, device=self.device)
-        
-        # Copy states to different sections
-        result[:n_states] = states  # X moves section
-        result[n_states:2*n_states] = states  # L moves section
-        result[2*n_states:] = states  # R moves section
-        
-        # Apply moves using pre-computed indices - all operations stay on GPU
-        result[:n_states] = result[:n_states].index_select(1, self.idx_x)  # X moves
-        result[n_states:2*n_states] = result[n_states:2*n_states].index_select(1, self.idx_l)  # L moves
-        result[2*n_states:] = result[2*n_states:].index_select(1, self.idx_r)  # R moves
-        
-        # Generate move types (0=X, 1=L, 2=R)
-        move_types = torch.arange(3, device=states.device).repeat_interleave(n_states)
-        
+        result = torch.empty(
+            (n_states * self.n_moves, self.state_size),
+            dtype=torch.int8,
+            device=self.device,
+        )
+        for move_code in range(self.n_moves):
+            block_start = move_code * n_states
+            block_end = block_start + n_states
+            idx = self.move_indices[move_code]
+            result[block_start:block_end] = states.index_select(1, idx)
+        move_types = torch.arange(self.n_moves, device=states.device).repeat_interleave(n_states)
         return result.contiguous(), move_types
 
     def _compute_state_hashes(self, states: torch.Tensor) -> torch.Tensor:
@@ -556,33 +553,26 @@ class BeamSearchSolver(BaseSolver):
 
         return unique_states, unique_indices
 
-    def _apply_moves(self, state: torch.Tensor, moves: Union[torch.Tensor, int]) -> torch.Tensor:
+    def _apply_moves(
+        self, state: torch.Tensor, moves: Union[torch.Tensor, int]
+    ) -> torch.Tensor:
         """Apply a sequence of moves or single move to a state."""
-        new_state = state.clone()
-        
+        new_state = state
+
         # Handle single move (int or 0-d tensor)
-        if isinstance(moves, (int, torch.Tensor)) and not isinstance(moves, (list, tuple)):
-            if isinstance(moves, torch.Tensor):
-                code = moves.item()
-            else:
-                code = moves
-            
-            if code == 0:  # X
-                new_state[[0, 1]] = new_state[[1, 0]]
-            elif code == 1:  # L
-                new_state = torch.roll(new_state, shifts=-1)
-            elif code == 2:  # R
-                new_state = torch.roll(new_state, shifts=1)
-        else:
-            # Sequence of moves
-            for move in moves:
-                code = move.item() if isinstance(move, torch.Tensor) else move
-                if code == 0:  # X
-                    new_state[[0, 1]] = new_state[[1, 0]]
-                elif code == 1:  # L
-                    new_state = torch.roll(new_state, shifts=-1)
-                elif code == 2:  # R
-                    new_state = torch.roll(new_state, shifts=1)
+        if isinstance(moves, (int, torch.Tensor)) and not isinstance(
+            moves, (list, tuple)
+        ):
+            move_code = int(moves) if isinstance(moves, int) else int(moves.item())
+            idx = self.move_indices[move_code]
+            return new_state.index_select(0, idx)
+
+        # Sequence of moves
+        for move in moves:
+            move_code = int(move) if isinstance(move, int) else int(move.item())
+            idx = self.move_indices[move_code]
+            new_state = new_state.index_select(0, idx)
+
         return new_state
     
     def _check_solution(self, states: torch.Tensor) -> Tuple[bool, int, torch.Tensor]:
@@ -717,13 +707,8 @@ class BeamSearchSolver(BaseSolver):
         return hashes, final_states_dict
 
     def _get_inverse_move(self, move: int) -> int:
-        """Get the inverse of a move (X->X, L->R, R->L)."""
-        if move == 0:  # X is self-inverse
-            return 0
-        elif move == 1:  # L inverse is R
-            return 2
-        else:  # R inverse is L
-            return 1
+        """Return inverse move code."""
+        return int(self.inverse_moves[int(move)].item())
 
     def _log_move_filtering(
         self,

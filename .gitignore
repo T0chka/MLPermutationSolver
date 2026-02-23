@@ -79,6 +79,7 @@ datasets/
 tmp/
 temp/
 *.tmp 
+competitions/
 
 # Drafts
 src/solvers/bidirectional_solver_draft.py

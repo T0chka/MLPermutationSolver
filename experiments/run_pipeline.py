@@ -12,13 +12,13 @@ import torch
 import pandas as pd
 
 from src.data_gen.random_walks import (
-    create_lrx_moves,
     first_visit_random_walks,
     random_walks_beam_nbt,
 )
 from src.models.catboost_model import CatBoostModel
 from src.models.xgboost_model import XGBoostModel
 from src.models.mlp_model import MLPModel
+from src.puzzles import make_spec
 from src.solvers.simple_solver import BeamSearchSolver
 from src.utils import estimate_gpu_limits
 
@@ -26,28 +26,30 @@ from src.utils import estimate_gpu_limits
 # CONFIGURATION — edit these
 # =============================================================================
 
+PUZZLE = "pancake" # "lrx"
+
 # Input: single permutation OR file
 # Option A: solve one permutation (list of ints 0..n-1)
-STATE = None #[1, 0, 2, 5, 4, 3]
+STATE = [8,5,32,34,21,22,14,9,20,7,25,4,37,35,28,13,29,8,26,19,0,12,3,10,36,16,11,15,27,39,31,2,24,33,1,30,6,23,17,38]
 
 # Option B: read from file (columns: n, permutation). Set STATE = None above.
-FILE_PATH = Path(__file__).parent / "test_files" / "longest_perms.csv"
-N_RANGE = [28]
+FILE_PATH = Path(__file__).parent / "test_files" / "pancake_test.csv" # "longest_perms.csv"
+N_RANGE = [5]
 
 # Pipeline parameters
-N_RUNS = 10  # Full re-runs per target (new data each time)
+N_RUNS = 1  # Full re-runs per target (new data each time)
 N_WALKS = 10000
 RW_TYPE = "beam_nbt"  # "beam_nbt" | "first_visit"
 MODEL_NAME = "xgboost"  # "xgboost" | "catboost" | "mlp"
 RW_NBT_DEPTH = 2  # NBT depth for random walks (beam_nbt)
 
 # Solver parameters
-BEAM_WIDTH = 2**18
+BEAM_WIDTH = 2**15
 MAX_STEPS_MULTIPLIER = 10
 USE_X_RULE = False
-TARGET_NEIGHBORHOOD_RADIUS = 15
+TARGET_NEIGHBORHOOD_RADIUS = 10
 BS_NBT_DEPTH = 2  # NBT depth for beam search
-VERBOSE = 0
+VERBOSE = 1
 
 # Batch sizes (GPU memory tuning)
 HASHES_BATCH_SIZE = 500_000
@@ -100,16 +102,21 @@ def load_targets():
     return targets
 
 
-def conj_length(n: int) -> int:
+def get_conj_length(n: int, puzzle: str) -> int:
     """Conjugation length: n - (n-1)/2 (integer)."""
-    return int(n * (n - 1) / 2)
+    if puzzle == "pancake":
+        return int(2 * n - 3)
+    elif puzzle == "lrx":
+        return int(n * (n - 1) / 2)
+    else:
+        raise ValueError(f"Unknown puzzle: {puzzle}")
 
 
-def run_pipeline(n: int, perm: torch.Tensor, perm_str: str) -> dict:
+def run_pipeline(n: int, perm: torch.Tensor, perm_str: str, conj_length: int) -> dict:
     """Generate data, train model, solve. Returns result dict."""
-    conj_steps = conj_length(n)
-    max_steps = int(conj_steps * MAX_STEPS_MULTIPLIER)
-    generators = create_lrx_moves(n)
+    max_steps = int(conj_length * MAX_STEPS_MULTIPLIER)
+    puzzle_spec = make_spec(PUZZLE, n, DEVICE)
+    generators = puzzle_spec.move_indices
     rw_fun = RW_FUNCTIONS[RW_TYPE]
 
     # Generate training data
@@ -117,13 +124,13 @@ def run_pipeline(n: int, perm: torch.Tensor, perm_str: str) -> dict:
     if RW_TYPE == "beam_nbt":
         X, y = rw_fun(
             generators,
-            n_steps=conj_steps,
+            n_steps=conj_length,
             n_walks=N_WALKS,
             nbt_depth=RW_NBT_DEPTH,
             device=DEVICE,
         )
     else:
-        X, y = rw_fun(generators, conj_steps, N_WALKS, DEVICE)
+        X, y = rw_fun(generators, conj_length, N_WALKS, DEVICE)
     data_time = time() - t0
     torch.cuda.empty_cache()
 
@@ -135,7 +142,7 @@ def run_pipeline(n: int, perm: torch.Tensor, perm_str: str) -> dict:
     torch.cuda.empty_cache()
 
     # Cap beam and batch sizes to avoid OOM
-    limits = estimate_gpu_limits(n, DEVICE)
+    limits = estimate_gpu_limits(n, DEVICE, n_moves=puzzle_spec.move_indices.size(0))
     beam_width = min(BEAM_WIDTH, limits["max_beam_width"])
     hashes_batch = min(HASHES_BATCH_SIZE, limits["hashes_batch_size"])
     filter_batch = min(FILTER_BATCH_SIZE, limits["filter_batch_size"])
@@ -154,6 +161,7 @@ def run_pipeline(n: int, perm: torch.Tensor, perm_str: str) -> dict:
     # Solve
     solver = BeamSearchSolver(
         state_size=n,
+        puzzle_spec=puzzle_spec,
         beam_width=beam_width,
         max_steps=max_steps,
         use_x_rule=USE_X_RULE,
@@ -209,8 +217,11 @@ def main():
     for i, (n, perm, perm_str) in enumerate(targets):
         run_results = []
         first_r = None
+
+        conj_length = get_conj_length(n, PUZZLE)
+
         for run_idx in range(N_RUNS):
-            r = run_pipeline(n, perm, perm_str)
+            r = run_pipeline(n, perm, perm_str, conj_length)
             if first_r is None:
                 first_r = r
             total_time = r["data_time"] + r["train_time"] + r["solve_time"]
@@ -229,7 +240,7 @@ def main():
         )
         table_rows.append({
             "state_size": n,
-            "conj_length": conj_length(n),
+            "conj_length": conj_length,
             "success_rate": n_success / N_RUNS,
             "runs": N_RUNS,
             "rw_type": rw_str,

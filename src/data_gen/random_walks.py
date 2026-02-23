@@ -3,6 +3,15 @@ import random
 import numpy as np
 from typing import Tuple, List
 
+def _as_move_tensor(
+    generators,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    if isinstance(generators, torch.Tensor):
+        return generators.to(device=device, dtype=dtype).contiguous()
+    return torch.tensor(generators, device=device, dtype=dtype).contiguous()
+
 def create_lrx_moves(state_size: int) -> List[List[int]]:
     """Create basic LRX moves: X (swap), L (left shift), R (right shift)"""
     identity = list(range(state_size))
@@ -27,7 +36,7 @@ def first_visit_random_walks(
     returns the sequence of visited states and their first occurrence step.
     """
     state_size = len(generators[0])
-    all_moves = torch.tensor(generators, device=device, dtype=torch.long)
+    all_moves = _as_move_tensor(generators, device, dtype=torch.long)
 
     # initialize
     total_states = n_steps * n_walks
@@ -85,7 +94,7 @@ def nbt_random_walks(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Generate non-backtracking random walks from identity permutation"""
     state_size = len(generators[0])
-    all_moves = torch.tensor(generators, device=device, dtype=torch.long)
+    all_moves = _as_move_tensor(generators, device, dtype=torch.long)
     
     # initialize starting states
     current_states = torch.arange(state_size, device=device).repeat(n_walks, 1)
@@ -181,7 +190,7 @@ def random_walks_beam_nbt(
     n_generators = len(generators)
     
     # Convert generators to tensor
-    tensor_generators = torch.tensor(generators, device=device, dtype=torch.int64)
+    tensor_generators = _as_move_tensor(generators, device, dtype=torch.int64)
     
     # Determine appropriate dtype based on state size
     if isinstance(dtype, str) and dtype.lower() == 'auto':

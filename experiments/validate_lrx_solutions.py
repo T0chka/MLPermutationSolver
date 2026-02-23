@@ -10,7 +10,7 @@ problems correctly by:
 
 Used for quality control of experiment results to ensure solution correctness.
 
-Usage: uv run experiments/validate_solutions.py
+Usage: uv run experiments/validate_solutions.py experiments/BS_results/rw_nbt_depth_experiments_15_beam_nbt_xgboost.csv
 """
 
 import argparse
