@@ -5,11 +5,12 @@ Configure everything in the header below. No argparse.
 Usage: uv run experiments/run_pipeline.py
 """
 
-from pathlib import Path
-from time import time
 import warnings
 import torch
 import pandas as pd
+
+from pathlib import Path
+from time import time
 
 from src.data_gen.random_walks import (
     first_visit_random_walks,
@@ -102,20 +103,11 @@ def load_targets():
     return targets
 
 
-def get_conj_length(n: int, puzzle: str) -> int:
-    """Conjugation length: n - (n-1)/2 (integer)."""
-    if puzzle == "pancake":
-        return int(2 * n - 3)
-    elif puzzle == "lrx":
-        return int(n * (n - 1) / 2)
-    else:
-        raise ValueError(f"Unknown puzzle: {puzzle}")
-
-
-def run_pipeline(n: int, perm: torch.Tensor, perm_str: str, conj_length: int) -> dict:
+def run_pipeline(n: int, perm: torch.Tensor, perm_str: str) -> dict:
     """Generate data, train model, solve. Returns result dict."""
-    max_steps = int(conj_length * MAX_STEPS_MULTIPLIER)
     puzzle_spec = make_spec(PUZZLE, n, DEVICE)
+    conj_length = puzzle_spec.conj_length
+    max_steps = int(conj_length * MAX_STEPS_MULTIPLIER)
     generators = puzzle_spec.move_indices
     rw_fun = RW_FUNCTIONS[RW_TYPE]
 
@@ -180,6 +172,7 @@ def run_pipeline(n: int, perm: torch.Tensor, perm_str: str, conj_length: int) ->
     return {
         "n": n,
         "permutation": perm_str,
+        "conj_length": conj_length,
         "success": found,
         "solution": solution if found else "Not found",
         "steps": steps,
@@ -218,10 +211,8 @@ def main():
         run_results = []
         first_r = None
 
-        conj_length = get_conj_length(n, PUZZLE)
-
         for run_idx in range(N_RUNS):
-            r = run_pipeline(n, perm, perm_str, conj_length)
+            r = run_pipeline(n, perm, perm_str)
             if first_r is None:
                 first_r = r
             total_time = r["data_time"] + r["train_time"] + r["solve_time"]
@@ -240,7 +231,7 @@ def main():
         )
         table_rows.append({
             "state_size": n,
-            "conj_length": conj_length,
+            "conj_length": first_r["conj_length"],
             "success_rate": n_success / N_RUNS,
             "runs": N_RUNS,
             "rw_type": rw_str,
