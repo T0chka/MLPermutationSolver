@@ -1,6 +1,8 @@
 import os
-import torch
 import logging
+
+import numpy as np
+import torch
 
 from typing import List, Tuple, Dict, Union, Optional
 from time import time
@@ -243,7 +245,7 @@ class BeamSearchSolver(BaseSolver):
                 })
                 
                 if additional_steps > 0:
-                    self.log_warning(f"Solution found in target neighborhood after {step} steps")
+                    self.log_info(f"Solution found in target neighborhood after {step} steps")
                     self.log_info(f"Additional {additional_steps} steps to reach solved state")
                 
                 self._display_search_stats()
@@ -787,42 +789,57 @@ class BeamSearchSolver(BaseSolver):
     def _get_target_neighborhood(self, radius: int) -> Tuple[torch.Tensor, Dict[int, Tuple[torch.Tensor, torch.Tensor]]]:
         """Precompute states within given radius of target state using BFS."""
         initial_state = self.solved_state.unsqueeze(0)
-        initial_hash = self._compute_state_hashes(initial_state).item()
-        
-        # Track states and their paths TO solved state
-        states_dict = {initial_hash: (initial_state[0], [])}
-        frontier = [(initial_state[0], [])]
-        
-        self.log_info(f"Starting BFS from solved state {initial_state[0]}")
-        
-        for depth in range(radius):
-            if not frontier:
-                break
-            
-            current_states = torch.stack([state for state, _ in frontier])
-            current_paths = [path for _, path in frontier]
-            
-            # Generate all possible next states
-            next_states, parents, next_moves = self._bulk_expand(
-                current_states, force_all_moves=True
-            )
-            
-            # Process states
-            next_frontier = []
-            for i in range(int(next_states.size(0))):
-                state = next_states[i]
-                parent_idx = int(parents[i].item())
-                move = int(next_moves[i].item())
-                hash_val = self._compute_state_hashes(state.unsqueeze(0)).item()
+        initial_hash = int(self._compute_state_hashes(initial_state).item())
 
-                if hash_val not in states_dict:
-                    inverse_move = self._get_inverse_move(move)
-                    new_path = [inverse_move] + current_paths[parent_idx].copy()
-                    states_dict[hash_val] = (state, new_path)
-                    next_frontier.append((state, new_path))
-            
-            frontier = next_frontier
-            self.log_info(f"Target neighborhood depth {depth + 1}: {len(states_dict)} states") 
+        states_dict: Dict[int, Tuple[torch.Tensor, List[int]]] = {
+            initial_hash: (initial_state[0].clone(), [])
+        }
+        frontier_states = initial_state
+        frontier_paths: List[List[int]] = [[]]
+        inverse_moves_np = self.inverse_moves.cpu().numpy()
+
+        self.log_info("Starting BFS from solved state")
+
+        for depth in range(radius):
+            if frontier_states.size(0) == 0:
+                break
+
+            next_states, parents, next_moves = self._bulk_expand(
+                frontier_states, force_all_moves=True
+            )
+            n_next = int(next_states.size(0))
+            if n_next == 0:
+                break
+
+            hashes_batch = self._compute_state_hashes(next_states)
+            hashes_np = hashes_batch.cpu().numpy()
+            parents_np = parents.cpu().numpy()
+            next_moves_np = next_moves.cpu().numpy()
+
+            visited_arr = np.fromiter(states_dict.keys(), dtype=np.int64, count=len(states_dict))
+            is_new = ~np.isin(hashes_np, visited_arr)
+            new_indices = np.flatnonzero(is_new)
+            n_new = int(new_indices.size)
+
+            if n_new == 0:
+                break
+
+            new_paths = []
+            for k in range(n_new):
+                idx = int(new_indices[k])
+                hash_val = int(hashes_np[idx])
+                parent_idx = int(parents_np[idx])
+                move = int(next_moves_np[idx])
+                inverse_move = int(inverse_moves_np[move])
+                new_path = [inverse_move] + frontier_paths[parent_idx].copy()
+                state_row = next_states[idx].clone()
+                states_dict[hash_val] = (state_row, new_path)
+                new_paths.append(new_path)
+
+            idx_t = torch.as_tensor(new_indices, device=self.device, dtype=torch.long)
+            frontier_states = next_states[idx_t].contiguous()
+            frontier_paths = new_paths
+            self.log_info(f"Target neighborhood depth {depth + 1}: {len(states_dict)} states")
         self.log_warning(f"Overall states in target neighborhood: {len(states_dict)}")
         
         # Convert paths to tensors
