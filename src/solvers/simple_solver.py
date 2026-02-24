@@ -28,6 +28,7 @@ class BeamSearchSolver(BaseSolver):
         filter_batch_size: int = 1_000_000,
         predict_batch_size: int = 1e10,
         nbt_depth: int = 5,  # Store only last N steps of hash history (NBT depth)
+        pancake_max_moves: int = 0,
         verbose: int = 0 # 0=WARNING, 1=INFO, 2=DEBUG
     ):
         """Initialize beam search solver."""
@@ -43,6 +44,7 @@ class BeamSearchSolver(BaseSolver):
         self.filter_batch_size = filter_batch_size
         self.predict_batch_size = predict_batch_size
         self.nbt_depth = nbt_depth
+        self.pancake_max_moves = pancake_max_moves
         
         self.puzzle_spec = puzzle_spec
 
@@ -52,6 +54,16 @@ class BeamSearchSolver(BaseSolver):
         self.solved_state = puzzle_spec.solved_state
 
         self.n_moves = int(self.move_indices.size(0))
+        
+        self.is_pancake = bool(
+            self.move_names and self.move_names[0].startswith("R")
+            and self.n_moves == self.state_size - 1
+        )
+        if self.is_pancake and self.pancake_max_moves > 0:
+            self.moves_per_state = min(self.pancake_max_moves, self.n_moves)
+        else:
+            self.moves_per_state = self.n_moves
+
         self.x_move_code = (
             self.move_names.index("X") if "X" in self.move_names else None
         )
@@ -67,7 +79,7 @@ class BeamSearchSolver(BaseSolver):
         ).contiguous()
         
         # Get solved state as sorted permutation
-        max_hashes_per_step = beam_width * self.n_moves
+        max_hashes_per_step = beam_width * self.moves_per_state
         
         # Single buffer for all hashes in history
         if self.nbt_depth > 0:
@@ -190,8 +202,7 @@ class BeamSearchSolver(BaseSolver):
             self.search_stats['current_step'] = step
             
             # 1. Expand all states at once - use GPU efficiently
-            next_states, next_moves = self._bulk_state_transform(current_states)
-            parents = torch.arange(len(current_states), device=self.device).repeat(self.n_moves)
+            next_states, parents, next_moves = self._bulk_expand(current_states)
             
             self._track_memory()  # Track memory after expansion
             
@@ -307,7 +318,7 @@ class BeamSearchSolver(BaseSolver):
                 self._track_memory()  # Track memory after combining filtered results
             else:
                 next_states = torch.empty((0, self.state_size), device=self.device, dtype=torch.int8)
-                parents = torch.empty(0, device=self.device, dtype=torch.int8)
+                parents = torch.empty(0, device=self.device, dtype=torch.long)
                 next_moves = torch.empty(0, device=self.device, dtype=torch.int8)
             
             # 4. Prune beam if needed
@@ -461,10 +472,125 @@ class BeamSearchSolver(BaseSolver):
         
         return pruned_states, pruned_parents, pruned_moves
 
+    def _bulk_expand(
+        self, states: torch.Tensor, force_all_moves: bool = False
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.is_pancake and self.pancake_max_moves > 0 and not force_all_moves:
+            return self._bulk_expand_pancake(states)
+
+        next_states, next_moves = self._bulk_state_transform(states)
+        parents = torch.arange(
+            states.size(0), device=self.device, dtype=torch.long
+        ).repeat(self.n_moves)
+        return next_states, parents, next_moves
+
+    def _bulk_expand_pancake(
+        self, states: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        n_states = int(states.size(0))
+        max_moves = int(self.moves_per_state)
+        indices = self._pancake_move_codes(states, max_moves)
+        move_indices = self.move_indices[indices]
+        expanded = states.unsqueeze(1).expand(-1, max_moves, -1)
+        children = torch.gather(expanded, 2, move_indices)
+        children = children.reshape(-1, self.state_size).contiguous()
+        parents = torch.arange(
+            n_states, device=self.device, dtype=torch.long
+        ).repeat_interleave(max_moves)
+        move_codes = indices.reshape(-1).contiguous()
+        return children, parents, move_codes
+
+    def _pancake_move_codes(
+        self, states: torch.Tensor, max_moves: int
+    ) -> torch.Tensor:
+        n_states = int(states.size(0))
+        state_size = int(states.size(1))
+        max_moves = int(max_moves)
+        n_moves = int(self.n_moves)
+        max_moves = min(max_moves, n_moves)
+
+        fill_code = n_moves - 1
+        move_codes = torch.full(
+            (n_states, max_moves),
+            fill_code,
+            device=self.device,
+            dtype=torch.long,
+        )
+
+        values = states.to(dtype=torch.long)
+        positions = torch.arange(
+            state_size, device=self.device, dtype=torch.long
+        ).unsqueeze(0).expand(n_states, -1)
+        inverse = torch.empty(
+            (n_states, state_size), device=self.device, dtype=torch.long
+        )
+        inverse.scatter_(1, values, positions)
+
+        top = values[:, 0]
+        minus_ok = top > 0
+        plus_ok = top < state_size - 1
+
+        minus_val = torch.clamp(top - 1, min=0)
+        plus_val = torch.clamp(top + 1, max=state_size - 1)
+
+        minus_pos = inverse.gather(1, minus_val.unsqueeze(1)).squeeze(1)
+        plus_pos = inverse.gather(1, plus_val.unsqueeze(1)).squeeze(1)
+
+        minus_k0 = minus_pos
+        minus_k1 = minus_pos + 1
+        plus_k0 = plus_pos
+        plus_k1 = plus_pos + 1
+
+        def _to_code(k: torch.Tensor) -> torch.Tensor:
+            ok = (k >= 2) & (k <= state_size)
+            k = torch.where(ok, k, torch.full_like(k, state_size))
+            return k - 2
+
+        col = 0
+        move_codes[:, col] = fill_code
+        col += 1
+
+        if col < max_moves:
+            move_codes[:, col] = torch.where(
+                minus_ok, _to_code(minus_k0), torch.full_like(top, fill_code)
+            )
+            col += 1
+        if col < max_moves:
+            move_codes[:, col] = torch.where(
+                plus_ok, _to_code(plus_k0), torch.full_like(top, fill_code)
+            )
+            col += 1
+        if col < max_moves:
+            move_codes[:, col] = torch.where(
+                minus_ok, _to_code(minus_k1), torch.full_like(top, fill_code)
+            )
+            col += 1
+        if col < max_moves:
+            move_codes[:, col] = torch.where(
+                plus_ok, _to_code(plus_k1), torch.full_like(top, fill_code)
+            )
+            col += 1
+
+        remaining = max_moves - col
+        if remaining <= 0:
+            return move_codes
+
+        diffs = torch.abs(values[:, 1:] - values[:, :-1]) != 1
+        lens = torch.arange(
+            1, state_size, device=self.device, dtype=torch.long
+        ).unsqueeze(0).expand(n_states, -1)
+        lens = lens.masked_fill(~diffs, 0)
+
+        top_lens, _ = torch.topk(lens, k=remaining, dim=1)
+        top_lens = torch.where(
+            top_lens >= 2, top_lens, torch.full_like(top_lens, state_size)
+        )
+        move_codes[:, col:col + remaining] = top_lens - 2
+        return move_codes
+
     def _bulk_state_transform(
         self, states: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Apply all moves. Returns (states, move_codes)."""
         n_states = states.size(0)
         result = torch.empty(
             (n_states * self.n_moves, self.state_size),
@@ -476,7 +602,9 @@ class BeamSearchSolver(BaseSolver):
             block_end = block_start + n_states
             idx = self.move_indices[move_code]
             result[block_start:block_end] = states.index_select(1, idx)
-        move_types = torch.arange(self.n_moves, device=states.device).repeat_interleave(n_states)
+        move_types = torch.arange(
+            self.n_moves, device=states.device, dtype=torch.long
+        ).repeat_interleave(n_states)
         return result.contiguous(), move_types
 
     def _compute_state_hashes(self, states: torch.Tensor) -> torch.Tensor:
@@ -675,17 +803,20 @@ class BeamSearchSolver(BaseSolver):
             current_paths = [path for _, path in frontier]
             
             # Generate all possible next states
-            next_states, next_moves = self._bulk_state_transform(current_states)
+            next_states, parents, next_moves = self._bulk_expand(
+                current_states, force_all_moves=True
+            )
             
             # Process states
             next_frontier = []
-            for i, (state, move) in enumerate(zip(next_states, next_moves)):
-                parent_idx = i % len(current_states)
+            for i in range(int(next_states.size(0))):
+                state = next_states[i]
+                parent_idx = int(parents[i].item())
+                move = int(next_moves[i].item())
                 hash_val = self._compute_state_hashes(state.unsqueeze(0)).item()
-                
+
                 if hash_val not in states_dict:
-                    # Create path TO solved state by prepending inverse move to parent's path
-                    inverse_move = self._get_inverse_move(move.item())
+                    inverse_move = self._get_inverse_move(move)
                     new_path = [inverse_move] + current_paths[parent_idx].copy()
                     states_dict[hash_val] = (state, new_path)
                     next_frontier.append((state, new_path))
