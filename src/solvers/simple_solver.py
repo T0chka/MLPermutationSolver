@@ -1,14 +1,17 @@
+"""Simple beam search solver using ML guidance."""
+
 import os
 import logging
 
 import numpy as np
 import torch
 
-from typing import List, Tuple, Dict, Union, Optional
+from typing import List, Optional, Tuple, Dict, Union
 from time import time
 
 from src.models.base_model import BaseModel
 from src.solvers.base_solver import BaseSolver
+from src.solvers.hash_history import HashHistory
 from src.puzzles import PuzzleSpec
 
 logger = logging.getLogger(__name__)
@@ -25,19 +28,22 @@ class BeamSearchSolver(BaseSolver):
         beam_width: int,
         max_steps: int,
         use_x_rule: bool = False,
-        target_neighborhood_radius: int = 0, # 0 for exact match
+        target_neighborhood_radius: int = 0,
         hashes_batch_size: int = 1_000_000,
         filter_batch_size: int = 1_000_000,
         predict_batch_size: int = 1e10,
-        nbt_depth: int = 5,  # Store only last N steps of hash history (NBT depth)
+        nbt_depth: int = 5,
         pancake_max_moves: int = 0,
-        verbose: int = 0 # 0=WARNING, 1=INFO, 2=DEBUG
+        randomize_ties: bool = True,
+        gap_lb_only: bool = False,
+        diversity_buckets: int = 0,
+        verbose: int = 0,
+        *,
+        adapter,
     ):
         """Initialize beam search solver."""
-        super().__init__(state_size, device, verbose=verbose)
-        
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,garbage_collection_threshold:0.8'
-        
+        super().__init__(puzzle_spec, device, model=None, verbose=verbose)
+        self.adapter = adapter
         self.beam_width = beam_width
         self.max_steps = max_steps
         self.use_x_rule = use_x_rule
@@ -47,24 +53,17 @@ class BeamSearchSolver(BaseSolver):
         self.predict_batch_size = predict_batch_size
         self.nbt_depth = nbt_depth
         self.pancake_max_moves = pancake_max_moves
-        
-        self.puzzle_spec = puzzle_spec
+        self.gap_lb_only = bool(gap_lb_only)
+        self.randomize_ties = bool(randomize_ties)
+        self.diversity_buckets = int(diversity_buckets)
+        self.lb_gap_start = None
 
+        self.puzzle_spec = puzzle_spec
         self.move_names = list(puzzle_spec.move_names)
         self.move_indices = puzzle_spec.move_indices
         self.inverse_moves = puzzle_spec.inverse_moves
         self.solved_state = puzzle_spec.solved_state
-
         self.n_moves = int(self.move_indices.size(0))
-        
-        self.is_pancake = bool(
-            self.move_names and self.move_names[0].startswith("R")
-            and self.n_moves == self.state_size - 1
-        )
-        if self.is_pancake and self.pancake_max_moves > 0:
-            self.moves_per_state = min(self.pancake_max_moves, self.n_moves)
-        else:
-            self.moves_per_state = self.n_moves
 
         self.x_move_code = (
             self.move_names.index("X") if "X" in self.move_names else None
@@ -80,25 +79,20 @@ class BeamSearchSolver(BaseSolver):
             device=device
         ).contiguous()
         
-        # Get solved state as sorted permutation
-        max_hashes_per_step = beam_width * self.moves_per_state
-        
-        # Single buffer for all hashes in history
+        # Hash history: NBT component, puzzle-agnostic
+        max_hashes_per_step = beam_width
         if self.nbt_depth > 0:
-            # Ensure there's enough space for at least one full step of hashes
             self.max_history_size = max(
                 max_hashes_per_step, self.nbt_depth * max_hashes_per_step
             )
-            self.hash_history_buffer = torch.empty(self.max_history_size, dtype=torch.int64, device=device)
         else:
             self.max_history_size = 0
-            self.hash_history_buffer = torch.empty(0, dtype=torch.int64, device=device)
-        
-        self.buffer_head = 0  # Position for writing new hashes
-        self.buffer_size = 0  # Current size of filled buffer
-        
-        # tracking for each step - where the hashes of this step start/end
-        self.step_boundaries = []  # [(start_idx, count), ...]
+        self.hash_history = HashHistory(
+            device=device,
+            max_history_size=self.max_history_size,
+            nbt_depth=self.nbt_depth,
+            hashes_batch_size=self.hashes_batch_size,
+        )
         
         # Memory tracking
         self.initial_memory = 0
@@ -162,9 +156,7 @@ class BeamSearchSolver(BaseSolver):
             'last_step_pruned': 0,     # Number of states pruned in the last step
         })
         # Reset hash history
-        self.buffer_head = 0
-        self.buffer_size = 0
-        self.step_boundaries = []
+        self.hash_history.reset()
         self.total_hashes_ever_seen = 0
         
         # Reset memory tracking
@@ -181,14 +173,34 @@ class BeamSearchSolver(BaseSolver):
         """
         self.reset()
         self.model = model
-        self.start_state = start_state.clone().to(dtype=torch.int8)
+        self.start_state = start_state.clone().to(dtype=self.state_dtype)
+        
+        max_steps = int(self.max_steps)
+        if self.gap_lb_only:
+            if not self.adapter.use_pruned_hashes_for_nbt():
+                raise ValueError("gap_lb_only is supported only for pancake puzzles")
+            if int(self.target_neighborhood_radius) != 0:
+                raise ValueError("gap_lb_only requires target_neighborhood_radius=0")
+            gap0 = int(
+                self.adapter.lower_bound(
+                    self.start_state.unsqueeze(0),
+                    self.solved_state,
+                    "forward",
+                ).item()
+            )
+            if max_steps < gap0:
+                raise ValueError(
+                    f"gap_lb_only requires max_steps >= gap_lb ({max_steps} < {gap0})"
+                )
+            self.lb_gap_start = gap0
+            max_steps = gap0
         
         # Initialize with start state
         start_hash = self._compute_state_hashes(self.start_state.unsqueeze(0))
         
         # Add initial hash to history if nbt_depth > 0
         if self.nbt_depth > 0:
-            self._update_hash_history(start_hash)
+            self.hash_history.add(start_hash)
         
         current_states = self.start_state.unsqueeze(0)
         self.log_info(f"Initial state: {start_state.cpu().numpy()}")
@@ -197,7 +209,7 @@ class BeamSearchSolver(BaseSolver):
         move_indices = []
         search_start = time()
         
-        for step in range(1, self.max_steps + 1):
+        for step in range(1, max_steps + 1):
             self.log_info(f"\n{'='*10} Step {step} {'='*10}")
             
             # Store current step in search_stats
@@ -224,9 +236,7 @@ class BeamSearchSolver(BaseSolver):
                 parents = parents[unique_indices]
                 next_moves = next_moves[unique_indices]
                 
-                # Free memory
                 del unique_states, unique_indices
-                torch.cuda.empty_cache()
                 self._track_memory()  # Track memory after deduplication
             
             # 2. Check for solution
@@ -258,6 +268,8 @@ class BeamSearchSolver(BaseSolver):
             all_filtered_parents = []
             all_filtered_moves = []
             all_new_hashes = []
+
+            remaining_steps = max_steps - step
             
             for batch_start in range(0, len(next_states), self.filter_batch_size):
                 batch_end = min(batch_start + self.filter_batch_size, len(next_states))
@@ -266,7 +278,8 @@ class BeamSearchSolver(BaseSolver):
                     next_states[batch_start:batch_end],
                     next_moves[batch_start:batch_end],
                     parents[batch_start:batch_end],
-                    current_states
+                    current_states,
+                    remaining_steps,
                 )
                 
                 self._track_memory()  # Track memory after filtering batch
@@ -278,50 +291,33 @@ class BeamSearchSolver(BaseSolver):
                     if new_hashes.numel() > 0:
                         all_new_hashes.append(new_hashes)
             
-            # Update hash history with new hashes
-            if all_new_hashes:
-                step_hashes = torch.cat(all_new_hashes)
-                
-                # Update total count of all hashes ever seen
-                self.total_hashes_ever_seen += step_hashes.size(0)
-                
-                # Only add to history if we're tracking it
-                if self.nbt_depth > 0:
-                    self.log_info(f"Before updating history: buffer_size={self.buffer_size}, boundaries={self.step_boundaries}")
-                    self._update_hash_history(step_hashes)
-                    # Update history stats
-                    current_hashes = self.buffer_size
-                    self.search_stats['Total hashes in history'] = current_hashes
-                    self.log_info(f"After updating history: buffer_size={self.buffer_size}, boundaries={self.step_boundaries}")
-                else:
-                    # No history tracking, so hashes in history is always 0
-                    self.search_stats['Total hashes in history'] = 0
-                
-                # Total hashes ever seen should be updated regardless
-                self.search_stats['Total hashes ever seen'] = self.total_hashes_ever_seen
-                
-                self._track_memory()  # Track memory after updating hash history
+            # Total hashes ever seen (for stats); keep for history when not gap_lb_only
+            step_hashes_from_filter = (
+                torch.cat(all_new_hashes) if all_new_hashes else
+                torch.empty(0, dtype=torch.int64, device=self.device)
+            )
+            if step_hashes_from_filter.numel() > 0:
+                self.total_hashes_ever_seen += step_hashes_from_filter.size(0)
             
             # Free memory
             del next_states, next_moves, parents
             if 'all_new_hashes' in locals():
                 del all_new_hashes
-            torch.cuda.empty_cache()
-            
+
             # Combine filtered results
             if all_filtered_states:
                 next_states = torch.cat(all_filtered_states)
                 parents = torch.cat(all_filtered_parents)
                 next_moves = torch.cat(all_filtered_moves)
                 
-                # Free memory
                 del all_filtered_states, all_filtered_parents, all_filtered_moves
-                torch.cuda.empty_cache()
                 self._track_memory()  # Track memory after combining filtered results
             else:
-                next_states = torch.empty((0, self.state_size), device=self.device, dtype=torch.int8)
+                next_states = torch.empty(
+                    (0, self.state_size), device=self.device, dtype=self.state_dtype
+                )
                 parents = torch.empty(0, device=self.device, dtype=torch.long)
-                next_moves = torch.empty(0, device=self.device, dtype=torch.int8)
+                next_moves = torch.empty(0, device=self.device, dtype=torch.int16)
             
             # 4. Prune beam if needed
             if next_states.shape[0] > self.beam_width:
@@ -336,6 +332,22 @@ class BeamSearchSolver(BaseSolver):
             else:
                 current_states = next_states
             
+            # Update hash history: when adapter says so, add only kept states
+            if self.nbt_depth > 0:
+                if self.adapter.use_pruned_hashes_for_nbt():
+                    step_hashes = self._compute_state_hashes(current_states)
+                else:
+                    step_hashes = step_hashes_from_filter
+                if step_hashes.numel() > 0:
+                    self.log_info(f"Before updating history: buffer_size={self.hash_history.buffer_size}")
+                    self.hash_history.add(step_hashes)
+                    self.search_stats['Total hashes in history'] = self.hash_history.buffer_size
+                    self.log_info(f"After updating history: buffer_size={self.hash_history.buffer_size}")
+                self._track_memory()
+            else:
+                self.search_stats['Total hashes in history'] = 0
+            self.search_stats['Total hashes ever seen'] = self.total_hashes_ever_seen
+
             parent_indices.append(parents)
             move_indices.append(next_moves)
             
@@ -355,55 +367,88 @@ class BeamSearchSolver(BaseSolver):
         next_states: torch.Tensor,
         next_moves: torch.Tensor,
         parents: torch.Tensor,
-        current_states: torch.Tensor
+        current_states: torch.Tensor,
+        remaining_steps: int,
+        apply_budget: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Filter states based on hash (already visited states) or rules (X rule, etc.)."""
+        """Filter states based on hash (already visited states) or rules (X rule, etc.).
+        apply_budget: if False, skip step-budget pruning (e.g. for backward direction
+        in bidirectional, where gaps are distance to solved, not to start).
+        """
+        if apply_budget:
+            budget_mask = self.adapter.filter_budget(
+                next_states,
+                remaining_steps,
+                gap_lb_only=self.gap_lb_only,
+                target_neighborhood_radius=self.target_neighborhood_radius,
+                state_size=self.state_size,
+            )
+            keep_idx = torch.where(budget_mask)[0]
+            if keep_idx.size(0) == 0:
+                empty_states = torch.empty(
+                    (0, self.state_size), dtype=next_states.dtype, device=self.device
+                )
+                empty_parents = torch.empty(0, dtype=parents.dtype, device=self.device)
+                empty_moves = torch.empty(0, dtype=next_moves.dtype, device=self.device)
+                empty_hashes = torch.empty(0, dtype=torch.int64, device=self.device)
+                return empty_states, empty_parents, empty_moves, empty_hashes
+
+            if keep_idx.size(0) < next_states.size(0):
+                next_states = torch.index_select(next_states, 0, keep_idx).contiguous()
+                next_moves = torch.index_select(next_moves, 0, keep_idx)
+                parents = torch.index_select(parents, 0, keep_idx)
+
         # Calculate hashes for this batch
         state_hashes = self._compute_state_hashes(next_states)
-        
+
         # Check if hashes are in history
-        is_in_history = self._check_history(state_hashes)
+        is_in_history = self.hash_history.check(state_hashes)
         is_new = ~is_in_history
-        
-        # Return only new hashes for adding to history
-        new_hashes = state_hashes[is_new] if torch.any(is_new) else torch.empty(0, dtype=torch.int64, device=self.device)
-        
+
         valid_moves = is_new
 
         # Filter states based on rules (X rule, etc.)
         if self.use_x_rule and self.x_move_code is not None:
             is_x_move = next_moves == self.x_move_code
-            
+
             # Optimized vectorized operation
             parent_indices = parents % current_states.size(0)
             first_vals = torch.gather(current_states[:, 0], 0, parent_indices)
             second_vals = torch.gather(current_states[:, 1], 0, parent_indices)
             first_smaller = first_vals < second_vals
-            
+
             valid_moves &= ~(is_x_move & first_smaller)
-            
+
+        # Return only new hashes for adding to history
+        new_hashes = (
+            state_hashes[valid_moves]
+            if torch.any(valid_moves)
+            else torch.empty(0, dtype=torch.int64, device=self.device)
+        )
+
         # Log filtering details if verbose
         if self.verbose > 1:
             self._log_move_filtering(
-                current_states, next_states, parents, 
+                current_states, next_states, parents,
                 next_moves, valid=valid_moves, is_visited=~is_new
             )
 
         # Select valid states efficiently
         valid_indices = torch.where(valid_moves)[0]
         if valid_indices.numel() > 0:
-            filtered_states = torch.index_select(next_states, 0, valid_indices).contiguous()
+            filtered_states = torch.index_select(
+                next_states, 0, valid_indices
+            ).contiguous()
             filtered_parents = torch.index_select(parents, 0, valid_indices)
             filtered_moves = torch.index_select(next_moves, 0, valid_indices)
         else:
-            filtered_states = torch.empty((0, self.state_size), dtype=next_states.dtype, device=self.device)
+            filtered_states = torch.empty(
+                (0, self.state_size), dtype=next_states.dtype, device=self.device
+            )
             filtered_parents = torch.empty(0, dtype=parents.dtype, device=self.device)
             filtered_moves = torch.empty(0, dtype=next_moves.dtype, device=self.device)
-        
-        # Free memory
+
         del is_in_history, is_new, valid_moves, valid_indices
-        torch.cuda.empty_cache()
-        
         return filtered_states, filtered_parents, filtered_moves, new_hashes
         
     def _prune_beam(
@@ -411,203 +456,177 @@ class BeamSearchSolver(BaseSolver):
         next_states: torch.Tensor,
         parents: torch.Tensor,
         moves: torch.Tensor,
-        current_states: torch.Tensor
+        current_states: torch.Tensor,
+        keep_width: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Prune beam to keep only top states according to model predictions."""
-        self.log_info(f"Pruning beam from {len(next_states)} to {self.beam_width} states")
-        
-        # Track pruning statistics
-        pruned_count = len(next_states) - min(self.beam_width, len(next_states))
-        
-        # Update pruning statistics
-        self.search_stats['pruned_states_total'] += pruned_count
-        self.search_stats['pruned_states_min'] = min(self.search_stats['pruned_states_min'], pruned_count) if pruned_count > 0 else self.search_stats['pruned_states_min']
-        self.search_stats['pruned_states_max'] = max(self.search_stats['pruned_states_max'], pruned_count)
-        self.search_stats['pruning_steps'] += 1
-        if self.search_stats['pruning_steps'] > 0:
-            self.search_stats['pruned_states_avg'] = self.search_stats['pruned_states_total'] / self.search_stats['pruning_steps']
-        
-        # Always update last step pruned (will hold the final step's value when search ends)
-        self.search_stats['last_step_pruned'] = pruned_count
-        
-        # Process model predictions in chunks for memory efficiency
-        num_states = next_states.shape[0]
+        """Prune beam to keep only top states according to model predictions.
+        keep_width: if set, keep at most this many (for chunked expansion).
+        """
+        k_target = int(keep_width) if keep_width is not None else self.beam_width
+        self.log_info(
+            f"Pruning beam from {len(next_states)} to "
+            f"{min(k_target, len(next_states))} states"
+        )
+
+        pruned_count = len(next_states) - min(k_target, len(next_states))
+        self.search_stats["pruned_states_total"] += pruned_count
+        if pruned_count > 0:
+            self.search_stats["pruned_states_min"] = min(
+                self.search_stats["pruned_states_min"], pruned_count
+            )
+        self.search_stats["pruned_states_max"] = max(
+            self.search_stats["pruned_states_max"], pruned_count
+        )
+        self.search_stats["pruning_steps"] += 1
+        if self.search_stats["pruning_steps"] > 0:
+            self.search_stats["pruned_states_avg"] = (
+                self.search_stats["pruned_states_total"]
+                / self.search_stats["pruning_steps"]
+            )
+        self.search_stats["last_step_pruned"] = pruned_count
+
+        num_states = int(next_states.size(0))
         chunk_size = min(int(self.predict_batch_size), num_states)
-        
-        # Pre-allocate tensor for model distances
-        model_distances = torch.empty(num_states, device=next_states.device, dtype=torch.float32)
-        
-        # Use half-precision for faster GPU computation
-        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-            for i in range(0, num_states, chunk_size):
-                end = min(i + chunk_size, num_states)
-                chunk = next_states[i:end]
-                
-                # This is where GPU utilization should be highest
-                distances_chunk = self.model.predict(chunk)
-                model_distances[i:end] = distances_chunk
-                
-                # Only free for very large chunks to avoid fragmentation
-                if chunk_size > 100000:
-                    del chunk, distances_chunk
-                    torch.cuda.empty_cache()
-        
-        # Use optimized GPU topk operation
-        k = min(self.beam_width, num_states)
-        top_values, top_indices = torch.topk(model_distances, k=k, largest=False, sorted=False)
-        
-        # Debug logging with optimized function
+
+        scores = torch.empty(num_states, device=next_states.device,
+                            dtype=torch.float32)
+
+        with torch.no_grad():
+            locked_mask = (
+                self.adapter.locked_mask(next_states)
+                if self.verbose > 1
+                else None
+            )
+
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                for i in range(0, num_states, chunk_size):
+                    end = min(i + chunk_size, num_states)
+                    s = next_states[i:end]
+                    p = parents[i:end]
+                    m = moves[i:end]
+                    scores[i:end] = self._score_candidates(
+                        s, p, m, current_states
+                    ).to(torch.float32)
+                    if chunk_size > 100000:
+                        del s, p, m
+
+            if self.gap_lb_only:
+                n_plus = num_states + 1
+                scores = scores * n_plus + torch.rand(
+                    num_states, device=scores.device, dtype=torch.float32
+                )
+
+        k = int(min(k_target, num_states))
+        if self.diversity_buckets > 0:
+            div_key = self.adapter.diversity_key(next_states)
+            bucket = div_key
+            rank = torch.empty(num_states, device=next_states.device, dtype=torch.int64)
+            rank[torch.argsort(scores)] = torch.arange(
+                num_states, device=next_states.device, dtype=torch.int64
+            )
+            key = bucket * (num_states + 1) + rank
+            top_indices = torch.topk(key, k=k, largest=False).indices
+        elif not self.randomize_ties:
+            top_indices = torch.topk(scores, k=k, largest=False, sorted=False).indices
+        else:
+            topk_out = torch.topk(scores, k=k, largest=False, sorted=True)
+            cutoff_value = topk_out.values[-1]
+            strict_mask = scores < cutoff_value
+            strict_indices = torch.nonzero(strict_mask).squeeze(1)
+            n_strict = int(strict_indices.numel())
+            need = int(k - n_strict)
+            if need <= 0:
+                top_indices = strict_indices[:k]
+            else:
+                tie_mask = scores == cutoff_value
+                tie_indices = torch.nonzero(tie_mask).squeeze(1)
+                perm = torch.randperm(int(tie_indices.numel()),
+                                    device=tie_indices.device)
+                chosen_ties = tie_indices.index_select(0, perm[:need])
+                top_indices = torch.cat([strict_indices, chosen_ties], dim=0)
+
         if self.verbose > 1:
             self._log_pruning_decisions(
-                next_states, parents, moves, model_distances, 
-                top_indices, current_states
+                next_states, parents, moves, scores, top_indices, current_states
             )
-        
-        # Apply pruning with efficient indexing
+
+        with torch.no_grad():
+            if locked_mask is not None:
+                kept_locked = locked_mask.index_select(0, top_indices)
+                self.log_info(
+                    f"Locked states kept: {kept_locked.sum().item()}/{top_indices.size(0)} "
+                    f"(before prune: {locked_mask.sum().item()}/{next_states.size(0)})"
+                )
+
         pruned_states = torch.index_select(next_states, 0, top_indices)
         pruned_parents = torch.index_select(parents, 0, top_indices)
         pruned_moves = torch.index_select(moves, 0, top_indices)
-        
-        # Free memory
-        del model_distances, top_values, top_indices
-        torch.cuda.empty_cache()
-        
+
+        del scores, top_indices
         return pruned_states, pruned_parents, pruned_moves
 
     def _bulk_expand(
         self, states: torch.Tensor, force_all_moves: bool = False
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if self.is_pancake and self.pancake_max_moves > 0 and not force_all_moves:
-            return self._bulk_expand_pancake(states)
+        """Expand states: adapter policy + core apply via gather."""
+        max_moves = getattr(self.adapter, "moves_per_state", self.n_moves)
+        policy_options = {
+            "max_moves": max_moves,
+            "only_decreasing": self.gap_lb_only and not force_all_moves,
+            "only_increasing": False,
+        }
+        if force_all_moves:
+            policy_options["max_moves"] = self.n_moves
+            policy_options["only_decreasing"] = False
 
-        next_states, next_moves = self._bulk_state_transform(states)
-        parents = torch.arange(
-            states.size(0), device=self.device, dtype=torch.long
-        ).repeat(self.n_moves)
-        return next_states, parents, next_moves
+        move_codes, valid_mask = self.adapter.move_codes_and_mask(
+            states, "forward", **policy_options
+        )
+        return self._apply_move_codes(states, move_codes, valid_mask, inverse=False)
 
-    def _bulk_expand_pancake(
-        self, states: torch.Tensor
+    def _apply_move_codes(
+        self,
+        states: torch.Tensor,
+        move_codes: torch.Tensor,
+        valid_mask: torch.Tensor,
+        inverse: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        n_states = int(states.size(0))
-        max_moves = int(self.moves_per_state)
-        indices = self._pancake_move_codes(states, max_moves)
-        move_indices = self.move_indices[indices]
-        expanded = states.unsqueeze(1).expand(-1, max_moves, -1)
-        children = torch.gather(expanded, 2, move_indices)
-        children = children.reshape(-1, self.state_size).contiguous()
-        parents = torch.arange(
-            n_states, device=self.device, dtype=torch.long
-        ).repeat_interleave(max_moves)
-        move_codes = indices.reshape(-1).contiguous()
-        return children, parents, move_codes
+        """Apply move codes via gather. Core logic, puzzle-agnostic."""
+        pairs = valid_mask.nonzero(as_tuple=False)
+        parent_ids = pairs[:, 0].to(dtype=torch.long)
+        col_ids = pairs[:, 1]
+        codes = move_codes[parent_ids, col_ids]
 
-    def _pancake_move_codes(
-        self, states: torch.Tensor, max_moves: int
+        if inverse:
+            indices = self.move_indices[self.inverse_moves[codes]]
+        else:
+            indices = self.move_indices[codes]
+
+        src = states.index_select(0, parent_ids)
+        children = torch.gather(src, 1, indices).contiguous()
+        return children, parent_ids, codes.to(dtype=torch.int16)
+
+    def _score_candidates(
+        self,
+        next_states: torch.Tensor,
+        parents: torch.Tensor,
+        moves: torch.Tensor,
+        current_states: torch.Tensor,
     ) -> torch.Tensor:
-        n_states = int(states.size(0))
-        state_size = int(states.size(1))
-        max_moves = int(max_moves)
-        n_moves = int(self.n_moves)
-        max_moves = min(max_moves, n_moves)
-
-        fill_code = n_moves - 1
-        move_codes = torch.full(
-            (n_states, max_moves),
-            fill_code,
-            device=self.device,
-            dtype=torch.long,
-        )
-
-        values = states.to(dtype=torch.long)
-        positions = torch.arange(
-            state_size, device=self.device, dtype=torch.long
-        ).unsqueeze(0).expand(n_states, -1)
-        inverse = torch.empty(
-            (n_states, state_size), device=self.device, dtype=torch.long
-        )
-        inverse.scatter_(1, values, positions)
-
-        top = values[:, 0]
-        minus_ok = top > 0
-        plus_ok = top < state_size - 1
-
-        minus_val = torch.clamp(top - 1, min=0)
-        plus_val = torch.clamp(top + 1, max=state_size - 1)
-
-        minus_pos = inverse.gather(1, minus_val.unsqueeze(1)).squeeze(1)
-        plus_pos = inverse.gather(1, plus_val.unsqueeze(1)).squeeze(1)
-
-        minus_k0 = minus_pos
-        minus_k1 = minus_pos + 1
-        plus_k0 = plus_pos
-        plus_k1 = plus_pos + 1
-
-        def _to_code(k: torch.Tensor) -> torch.Tensor:
-            ok = (k >= 2) & (k <= state_size)
-            k = torch.where(ok, k, torch.full_like(k, state_size))
-            return k - 2
-
-        col = 0
-        move_codes[:, col] = fill_code
-        col += 1
-
-        if col < max_moves:
-            move_codes[:, col] = torch.where(
-                minus_ok, _to_code(minus_k0), torch.full_like(top, fill_code)
+        """Base score from model + adapter.score_extra."""
+        base = (
+            self.model.predict(next_states).to(torch.float32)
+            if self.model is not None
+            else torch.zeros(
+                next_states.size(0),
+                device=next_states.device,
+                dtype=torch.float32,
             )
-            col += 1
-        if col < max_moves:
-            move_codes[:, col] = torch.where(
-                plus_ok, _to_code(plus_k0), torch.full_like(top, fill_code)
-            )
-            col += 1
-        if col < max_moves:
-            move_codes[:, col] = torch.where(
-                minus_ok, _to_code(minus_k1), torch.full_like(top, fill_code)
-            )
-            col += 1
-        if col < max_moves:
-            move_codes[:, col] = torch.where(
-                plus_ok, _to_code(plus_k1), torch.full_like(top, fill_code)
-            )
-            col += 1
-
-        remaining = max_moves - col
-        if remaining <= 0:
-            return move_codes
-
-        diffs = torch.abs(values[:, 1:] - values[:, :-1]) != 1
-        lens = torch.arange(
-            1, state_size, device=self.device, dtype=torch.long
-        ).unsqueeze(0).expand(n_states, -1)
-        lens = lens.masked_fill(~diffs, 0)
-
-        top_lens, _ = torch.topk(lens, k=remaining, dim=1)
-        top_lens = torch.where(
-            top_lens >= 2, top_lens, torch.full_like(top_lens, state_size)
         )
-        move_codes[:, col:col + remaining] = top_lens - 2
-        return move_codes
-
-    def _bulk_state_transform(
-        self, states: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        n_states = states.size(0)
-        result = torch.empty(
-            (n_states * self.n_moves, self.state_size),
-            dtype=torch.int8,
-            device=self.device,
+        extra = self.adapter.score_extra(
+            next_states, parents, moves, current_states
         )
-        for move_code in range(self.n_moves):
-            block_start = move_code * n_states
-            block_end = block_start + n_states
-            idx = self.move_indices[move_code]
-            result[block_start:block_end] = states.index_select(1, idx)
-        move_types = torch.arange(
-            self.n_moves, device=states.device, dtype=torch.long
-        ).repeat_interleave(n_states)
-        return result.contiguous(), move_types
+        return base + extra
 
     def _compute_state_hashes(self, states: torch.Tensor) -> torch.Tensor:
         """Compute unique hashes for states using vectorized operations."""
@@ -659,16 +678,15 @@ class BeamSearchSolver(BaseSolver):
         hashes = self._compute_state_hashes(states)
         n = hashes.size(0)
 
-        # Sort hashes to identify unique elements
-        sorted_hashes, sort_indices = torch.sort(hashes)
+        # Sort hashes to identify unique elements (argsort + gather uses less memory)
+        sort_indices = torch.argsort(hashes)
+        sorted_hashes = hashes[sort_indices]
         mask = torch.ones(n, dtype=torch.bool, device=self.device)
         mask[1:] = sorted_hashes[1:] != sorted_hashes[:-1]
         unique_indices = sort_indices[mask].clone()
         num_unique = unique_indices.size(0)
 
-        # Free intermediates before allocating unique_states to reduce peak memory
         del hashes, sorted_hashes, sort_indices, mask
-        torch.cuda.empty_cache()
 
         # Build unique_states: copy in chunks to avoid OOM on large single index
         unique_states = torch.empty(
@@ -727,17 +745,23 @@ class BeamSearchSolver(BaseSolver):
                     for h, (s, p) in self.target_paths.items():
                         if torch.all(states[idx] == s):
                             return True, idx, p
-                    return False, -1, torch.empty(0, dtype=torch.int8, device=self.device)
+                    return False, -1, torch.empty(
+                        0, dtype=self.state_dtype, device=self.device
+                    )
                 
                 return True, idx, stored_path
             
-            return False, -1, torch.empty(0, dtype=torch.int8, device=self.device)
+            return False, -1, torch.empty(
+                0, dtype=self.state_dtype, device=self.device
+            )
         else:
             # Check for exact match with solved state
             matches = torch.all(states == self.solved_state, dim=1)
             found = torch.any(matches)
             idx = torch.where(matches)[0][0].item() if found else -1
-            return found, idx, torch.empty(0, dtype=torch.int8, device=self.device)
+            return found, idx, torch.empty(
+                0, dtype=self.state_dtype, device=self.device
+            )
         
     def reconstruct_solution(
         self,
@@ -761,7 +785,9 @@ class BeamSearchSolver(BaseSolver):
             current_idx = parent_indices[step-1][current_idx].item()
         
         # Convert to tensor and reverse to get chronological order
-        moves = torch.tensor(reverse_moves[::-1], dtype=torch.int8, device=self.device)
+        moves = torch.tensor(
+            reverse_moves[::-1], dtype=self.state_dtype, device=self.device
+        )
         
         # If we found a state in target neighborhood, append its path
         if target_path is not None and target_path.numel() > 0:
@@ -845,7 +871,9 @@ class BeamSearchSolver(BaseSolver):
         # Convert paths to tensors
         final_states_dict = {}
         for hash_val, (state, path) in states_dict.items():
-            path_tensor = torch.tensor(path, dtype=torch.int8, device=self.device)
+            path_tensor = torch.tensor(
+                path, dtype=self.state_dtype, device=self.device
+            )
             final_states_dict[hash_val] = (state, path_tensor)
         
         hashes = torch.tensor(
@@ -978,83 +1006,3 @@ class BeamSearchSolver(BaseSolver):
             self.log_info(f"  Last step pruned states: {self.search_stats['last_step_pruned']}")
         self.log_info("=" * 40)
 
-    def _update_hash_history(self, new_hashes):
-        """Add new hashes to circular buffer."""
-        if self.nbt_depth <= 0:
-            self.step_boundaries.clear()
-            self.buffer_size = 0
-            self.buffer_head = 0
-            return
-
-        n_hashes = new_hashes.size(0)
-
-        while self.buffer_size + n_hashes > self.max_history_size and self.step_boundaries:
-            old_start, old_count = self.step_boundaries.pop(0)
-            self.buffer_size = max(0, self.buffer_size - old_count)
-
-        step_start = self.buffer_head
-
-        if self.buffer_head + n_hashes > self.max_history_size:
-            first_part = self.max_history_size - self.buffer_head
-            second_part = n_hashes - first_part
-            self.hash_history_buffer[self.buffer_head:] = new_hashes[:first_part]
-            self.hash_history_buffer[:second_part] = new_hashes[first_part:]
-            self.buffer_head = second_part
-        else:
-            self.hash_history_buffer[self.buffer_head:self.buffer_head + n_hashes] = new_hashes
-            self.buffer_head = (self.buffer_head + n_hashes) % self.max_history_size
-
-        self.step_boundaries.append((step_start, n_hashes))
-        self.buffer_size = min(self.buffer_size + n_hashes, self.max_history_size)
-
-        while len(self.step_boundaries) > self.nbt_depth:
-            old_start, old_count = self.step_boundaries.pop(0)
-            self.buffer_size = max(0, self.buffer_size - old_count)
-
-    def _check_history(self, state_hashes):
-        """Check if hashes have been seen in history. Processes in batches to avoid OOM."""
-        n = state_hashes.size(0)
-        if self.nbt_depth == 0 or self.buffer_size == 0:
-            return torch.zeros(n, dtype=torch.bool, device=self.device)
-
-        is_in_history = torch.zeros(n, dtype=torch.bool, device=self.device)
-        batch_size = self.hashes_batch_size
-        i = 0
-
-        while i < n:
-            end = min(i + batch_size, n)
-            chunk = state_hashes[i:end]
-            try:
-                chunk_in_history = torch.zeros(
-                    chunk.size(0), dtype=torch.bool, device=self.device
-                )
-                for start_idx, count in self.step_boundaries:
-                    end_idx = start_idx + count
-                    if end_idx <= self.max_history_size:
-                        chunk_in_history |= torch.isin(
-                            chunk,
-                            self.hash_history_buffer[start_idx:end_idx],
-                        )
-                    else:
-                        first_part = self.max_history_size - start_idx
-                        second_part = count - first_part
-                        chunk_in_history |= torch.isin(
-                            chunk, self.hash_history_buffer[start_idx:]
-                        )
-                        chunk_in_history |= torch.isin(
-                            chunk, self.hash_history_buffer[:second_part]
-                        )
-                is_in_history[i:end] = chunk_in_history
-                i = end
-            except torch.cuda.OutOfMemoryError:
-                torch.cuda.empty_cache()
-                new_batch = max(5_000, batch_size // 2)
-                if new_batch >= batch_size:
-                    raise
-                logger.warning(
-                    "OOM in _check_history: reducing batch %s -> %s (n=%s)",
-                    batch_size, new_batch, n,
-                )
-                self.hashes_batch_size = new_batch
-                batch_size = new_batch
-        return is_in_history

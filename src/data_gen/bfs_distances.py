@@ -1,3 +1,5 @@
+"""Compute BFS distances for a given set of generators."""
+
 from typing import List, Sequence, Tuple
 
 import numpy as np

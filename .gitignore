@@ -80,6 +80,7 @@ tmp/
 temp/
 *.tmp 
 competitions/
+solvers_old/
 
 # Drafts
 src/solvers/bidirectional_solver_draft.py
