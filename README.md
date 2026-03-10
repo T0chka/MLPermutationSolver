@@ -67,7 +67,6 @@ The `experiments/` directory contains scripts for:
 - **Benchmarking** random walk implementations
 - **Optimizing** hyperparameters  
 - **Profiling** model and solver performance
-- **Validating** solution correctness
 
 See [experiments/README_exp.md](experiments/README_exp.md) for detailed descriptions of each script and their parameters.
 
@@ -75,9 +74,9 @@ See [experiments/README_exp.md](experiments/README_exp.md) for detailed descript
 
 ### BFS Distances (src/data_gen/bfs_distances.py)
 
-Numba-optimized BFS over the full permutation graph (X, L, R moves). Computes
-exact distances from the identity to every reachable state. Memory-bound:
-max n=13 on RTX 3090 with 24 GB VRAM / 124 GB RAM (~70 GiB for n=13).
+Numba-optimized BFS over the full permutation Cayley graph for any puzzle (generators
+passed in). Computes exact distances from the identity to every reachable state.
+Memory-bound for LRX puzzle: max n=13 on RTX 3090 with 24 GB VRAM / 124 GB RAM (~70 GiB for n=13).
 Typical runtimes: n=12 ~2 min, n=13 ~35 min.
 
 ### Random Walk Data Generation (src/data_gen/random_walks.py)
@@ -165,7 +164,7 @@ reconstruct the network on load.
 - **Search scheduling**
   - `SearchScheduler` / `IndependentFrontierScheduler` layer that chooses which frontier
     (forward / backward) to expand, ready for future NBS / pair-based schedulers
-- **Exact solver**
+- **Exact solver (pancake only)**
   - `PancakeExactSolver` with pluggable incumbent solver selected via solver registry
 
 All hot-path pieces (expansion kernel, hash history, meet index, path assembly,
