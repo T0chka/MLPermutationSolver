@@ -1,6 +1,6 @@
 # Experiment Scripts
 
-This folder contains scripts for benchmarking and optimizing random walk implementations.
+This folder contains scripts for benchmarking and optimizing random walks, model, and solver implementations.
 
 ## benchmark_random_walks.py
 
@@ -74,24 +74,51 @@ Output files (saved to `BS_results/profile_model/`):
 
 ## profile_solver.py
 
-Profiles solver performance with different batch sizes, measuring execution time,
-memory usage, and exploration statistics for BeamSearchSolver.
+Profiles the modern `BeamSolver` implementation and its runtime profiler.
+Runs solver instances on GPU and reports both coarse statistics and
+stage-level timings.
 
-Parameters:
-- `--state-size`: Size of permutation vector (default: 16)
-- `--beam-width`: Beam width for search (default: 2^state_size)
-- `--batch-sizes`: Comma-separated list of batch sizes (default: "10000,50000,100000,500000")
-- `--history-window`: History window size (default: conjectured_steps/5)
-- `--use-x-rule`: Enable X-rule optimization
-- `--target-radius`: Target neighborhood radius (default: 0)
-- `--no-plot`: Disable plotting
-- `--verbose`: Enable verbose solver output
+There is no CLI; configuration is done by editing two objects in the script:
+
+- `CFG: ProfileConfig`
+  - `puzzle_type`: puzzle family (`"pancake"` by default)
+  - `state_sizes`: list of state sizes to test
+  - `backward_modes`: list of backward modes
+    (`"off"`, `"bfs"`, `"beam"`)
+  - `beam_width`, `max_steps_extra`, `backward_max_states`,
+    `bs_nbt_depth`, `hashes_batch_size`, `random_seed`
+- `RUNS: List[Dict[str, Any]]`
+  - Optional explicit run list; if non-empty, overrides the
+    Cartesian grid `state_sizes × backward_modes`
+  - Each dict has keys:
+    - required: `puzzle_type`, `state_size`, `backward_mode`
+    - optional: `beam_width`, `max_steps`
+
+For each run the script:
+
+- builds a `PuzzleSpec` and adapter,
+- constructs `BeamSolver` via the solver factory with `profile_runtime=True`,
+- samples a random start permutation on GPU,
+- runs `solve()` once and records:
+  - wall-clock time,
+  - CUDA peak memory,
+  - states explored and backward-archive size,
+  - solution length and success flag.
+
+It also reads per-stage profiling data from `solver.search_stats["profile"]`
+and prints two tables:
+
+- **Stage timing (seconds)** for stages:
+  `expand`, `unique`, `history_filter`, `lower_bound`,
+  `beam_prune`, `meet_lookup`, `bfs_prebuild`
+- **Stage counts**: number of calls and total input states for each stage
 
 Output files (saved to `BS_results/profile_solver/`):
-- `profile_solver_size{state_size}_beam{beam_width}.png`: Performance analysis plots
-- `profile_solver_size{state_size}_beam{beam_width}.csv`: Detailed profiling results
 
-## run_rw_nbt_depth_experiment_.py
+- `profile_results.json`: JSON list with one record per run,
+  including coarse stats and (optionally) embedded `profile` dict
+
+## tune_rw_nbt_depth.py
 
 Tests the effect of random walks NBT (non-backtracking) depth on solver performance
 by varying the RW nbt_depth parameter for data generation.
@@ -106,24 +133,6 @@ Parameters (configured in script):
 - `bs_nbt_depth`: BeamSearchSolver NBT depth (fixed)
 - `beam_width`: BeamSearchSolver beam width
 
-Output files (saved to `BS_results/run_rw_nbt_depth_experiment_/`):
+Output files (saved to `BS_results/tune_rw_nbt_depth/`):
 - `rw_nbt_depth_experiments_{base_name}.csv`: Detailed results for each run
 - `rw_nbt_depth_stats_{base_name}.csv`: Summary statistics grouped by NBT depth
-
-## validate_solutions.py
-
-Validates solution files from permutation sorting experiments by verifying
-that move sequences actually solve the problems correctly.
-
-Functions:
-- Applies move sequences (X, L, R) to verify solutions reach sorted state
-- Detects suboptimal X moves (swapping when elements are already ordered)
-- Reports validation statistics and error details
-
-Parameters:
-- `solutions_file`: Path to CSV file containing solutions to validate (command-line argument)
-
-Output:
-- Prints detailed validation summary with statistics
-- Reports invalid solution details with specific error reasons
-- File remains unchanged (read-only validation) 

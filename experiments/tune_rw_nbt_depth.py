@@ -6,7 +6,7 @@ of non-backtracking affects:
 - BeamSearchSolver success rates
 - Solution efficiency (steps, time, memory usage)
 
-Usage: uv run experiments/run_rw_nbt_depth_experiment_.py
+Usage: uv run experiments/tune_rw_nbt_depth.py
 """
 
 from pathlib import Path
@@ -22,9 +22,11 @@ from src.data_gen.random_walks import (
 from src.models.catboost_model import CatBoostModel
 from src.models.xgboost_model import XGBoostModel
 from src.models.mlp_model import MLPModel
-from src.solvers.simple_solver import BeamSearchSolver
+from src.puzzles import make_lrx_spec
+from src.solvers.factory import make_solver
+from src.solvers.puzzle_adapters import get_adapter
 
-RESULTS_DIR = Path(__file__).resolve().parent / "BS_results" / "run_rw_nbt_depth_experiment_"
+RESULTS_DIR = Path(__file__).resolve().parent / "BS_results" / "tune_rw_nbt_depth"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 def factorial(n):
@@ -41,8 +43,7 @@ EXPERIMENT_PARAMS = {
     'model_name': "xgboost",
     'bs_nbt_depth': 2,  # NBT depth for BeamSearchSolver
     'max_steps_multiplier': 10,
-    'use_x_rule': False,
-    'target_neighborhood_radius': 15,
+    'backward_mode': "off",
     'verbose': 0,
     'test_path': 'experiments/test_files/longest_perms.csv'
 }
@@ -138,8 +139,7 @@ for _, row in test_df.iterrows():
                 r['nbt_depth'] == nbt_depth and
                 r['model'] == EXPERIMENT_PARAMS['model_name'] and
                 r['beam_width'] == beam_width and
-                r['target_neighborhood_radius'] == EXPERIMENT_PARAMS['target_neighborhood_radius'] and
-                r['use_x_rule'] == EXPERIMENT_PARAMS['use_x_rule'] and
+                r['backward_mode'] == EXPERIMENT_PARAMS['backward_mode'] and
                 r['bs_nbt_depth'] == BS_NBT_DEPTH and
                 r['permutation'] == row['permutation'] and
                 r['max_steps'] == MAX_STEPS)
@@ -204,19 +204,18 @@ for _, row in test_df.iterrows():
             
             print(f"Training completed in {train_time:.2f}s")
             
-            # Initialize solver with current parameters
-            solver = BeamSearchSolver(
-                state_size=size, 
+            puzzle_spec = make_lrx_spec(size, DEVICE)
+            adapter = get_adapter("lrx", puzzle_spec, DEVICE)
+            solver = make_solver(
+                puzzle_spec,
+                "beam",
+                adapter,
                 beam_width=beam_width,
                 max_steps=MAX_STEPS,
-                use_x_rule=EXPERIMENT_PARAMS['use_x_rule'],
-                target_neighborhood_radius=EXPERIMENT_PARAMS['target_neighborhood_radius'],
+                backward_mode=EXPERIMENT_PARAMS['backward_mode'],
                 hashes_batch_size=500_000,
-                filter_batch_size=1_000_000,
-                predict_batch_size=10_000_000,
-                nbt_depth=BS_NBT_DEPTH,
+                bs_nbt_depth=BS_NBT_DEPTH,
                 verbose=EXPERIMENT_PARAMS['verbose'],
-                device=DEVICE
             )
             
             # Solve the problem
@@ -244,8 +243,7 @@ for _, row in test_df.iterrows():
                 'permutation': row['permutation'],
                 'n': size,
                 'beam_width': beam_width,
-                'target_neighborhood_radius': EXPERIMENT_PARAMS['target_neighborhood_radius'],
-                'use_x_rule': EXPERIMENT_PARAMS['use_x_rule'],
+                'backward_mode': EXPERIMENT_PARAMS['backward_mode'],
                 'bs_nbt_depth': BS_NBT_DEPTH,
                 'max_steps': MAX_STEPS,
                 'run': run,

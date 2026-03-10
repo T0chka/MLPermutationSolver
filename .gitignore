@@ -73,14 +73,11 @@ experiments/BS_results/
 
 # Data files
 data/
-datasets/
 
 # Temporary files
 tmp/
 temp/
 *.tmp 
 competitions/
-solvers_old/
 
 # Drafts
-src/solvers/bidirectional_solver_draft.py

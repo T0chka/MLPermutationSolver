@@ -15,7 +15,8 @@ class CatBoostModel(BaseModel):
             learning_rate=learning_rate,
             task_type="GPU",
             thread_count=-1,
-            verbose=0
+            verbose=0,
+            allow_writing_files=False,
         )
     
     def train(self, X: torch.Tensor, y: torch.Tensor) -> None:

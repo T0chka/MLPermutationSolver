@@ -11,7 +11,7 @@ class BaseModel(ABC):
     
     @abstractmethod
     def predict(self, X: torch.Tensor) -> torch.Tensor:
-        """Predict distances for given states"""
+        """Predict distances for given states. Must return float32 tensor."""
         pass
     
     @abstractmethod

@@ -1,6 +1,10 @@
+import logging
+
 import torch
 import torch.nn as nn
 from .base_model import BaseModel
+
+logger = logging.getLogger(__name__)
 
 class MLPNetwork(nn.Module):
     """Neural network architecture for permutation solving"""
@@ -38,13 +42,15 @@ class MLPModel(BaseModel):
         hidden_sizes: list = [128],
         learning_rate: float = 0.001,
         batch_size: int = 1024,
-        epochs: int = 50
+        epochs: int = 50,
+        verbose: int = 0,
     ):
         self.input_size = input_size
         self.hidden_sizes = hidden_sizes
         self.learning_rate = learning_rate
         self.batch_size = batch_size
         self.epochs = epochs
+        self.verbose = verbose
         
         # Initialize network
         self.model = MLPNetwork(input_size, hidden_sizes)
@@ -87,8 +93,10 @@ class MLPModel(BaseModel):
                 num_batches += 1
             
             avg_loss = total_loss / num_batches
-            if epoch % 10 == 0:  # Print every 10 epochs
-                print(f"Epoch {epoch}/{self.epochs}, Loss: {avg_loss:.6f}")
+            if self.verbose >= 1 and epoch % 10 == 0:
+                logger.info(
+                    "Epoch %d/%d, Loss: %.6f", epoch, self.epochs, avg_loss
+                )
     
     def predict(self, X: torch.Tensor) -> torch.Tensor:
         """Predict distances for given states"""
