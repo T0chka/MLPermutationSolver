@@ -5,11 +5,12 @@ excluding all admissible shorter solutions down to the gap lower bound.
 Proof procedure:
 1. Validate the candidate solution.
 2. If its length equals the gap count, certify it as optimal immediately.
-3. Otherwise, prove that no solution of length gap count exists.
-4. If needed, prove that no solution of length gap count + 1 exists.
-5. If all shorter lengths are excluded, certify the candidate as optimal.
+3. Otherwise, search shorter solutions by increasing slack over the gap bound.
+4. If all shorter lengths are excluded, certify it as optimal.
 
-Currently, certification is supported only up to gap count + 2.
+The exact search runs in the expanded state space (perm, slack_left), where the
+move cost is 0 for a gap-decreasing move, 1 for a neutral move, and 2 for a
+gap-increasing move.
 """
 
 from time import time
@@ -23,7 +24,6 @@ import torch
 from src.models.base_model import BaseModel
 from src.puzzles import PuzzleSpec
 from src.solvers.base_solver import BaseSolver
-
 
 
 @njit(cache=False)  # cache=True + torch in process causes segfault on 2nd call
@@ -90,29 +90,6 @@ def _delta_gap_for_move_numba(state: np.ndarray, move_code: int) -> int:
 
 
 @njit(cache=False)
-def _has_decreasing_move_numba(state: np.ndarray, pos: np.ndarray) -> bool:
-    """Return True if some move decreases gap."""
-    n = state.shape[0]
-    top = state[0]
-
-    if top > 0:
-        idx = pos[top - 1]
-        if idx >= 2 and abs(state[idx - 1] - state[idx]) != 1:
-            return True
-
-    if top + 1 < n:
-        idx = pos[top + 1]
-        if idx >= 2 and abs(state[idx - 1] - state[idx]) != 1:
-            return True
-
-    if top == n - 1:
-        if abs(state[n - 1] - n) != 1:
-            return True
-
-    return False
-
-
-@njit(cache=False)
 def _decreasing_candidates_numba(
     state: np.ndarray,
     pos: np.ndarray,
@@ -157,190 +134,144 @@ def _decreasing_candidates_numba(
     return count, move0, move1, move2
 
 
-@njit(cache=False)
-def _dfs_gap_numba(
-    state: np.ndarray,
-    pos: np.ndarray,
-    depth: int,
-    target_len: int,
-    path: np.ndarray,
-    nodes: np.ndarray,
-) -> bool:
-    """DFS over decreasing moves only."""
-    nodes[0] += 1
+def _state_key(state: np.ndarray) -> int | tuple[int, ...]:
+    """Pack a state into 64-bit words for TT lookup."""
+    word = 0
+    shift = 0
+    words: list[int] = []
 
-    if depth == target_len:
-        return _is_solved_numba(state)
+    for value in state:
+        word |= int(value) << shift
+        shift += 16
+        if shift == 64:
+            words.append(word)
+            word = 0
+            shift = 0
 
-    count, move0, move1, move2 = _decreasing_candidates_numba(state, pos)
+    if shift != 0:
+        words.append(word)
 
-    if count >= 1:
-        _apply_move_inplace_numba(state, pos, move0)
-        path[depth] = move0
-        found = _dfs_gap_numba(state, pos, depth + 1, target_len, path, nodes)
-        _apply_move_inplace_numba(state, pos, move0)
-        if found:
-            return True
-
-    if count >= 2:
-        _apply_move_inplace_numba(state, pos, move1)
-        path[depth] = move1
-        found = _dfs_gap_numba(state, pos, depth + 1, target_len, path, nodes)
-        _apply_move_inplace_numba(state, pos, move1)
-        if found:
-            return True
-
-    if count >= 3:
-        _apply_move_inplace_numba(state, pos, move2)
-        path[depth] = move2
-        found = _dfs_gap_numba(state, pos, depth + 1, target_len, path, nodes)
-        _apply_move_inplace_numba(state, pos, move2)
-        if found:
-            return True
-
-    return False
+    if len(words) == 1:
+        return words[0]
+    return tuple(words)
 
 
-@njit(cache=False)
-def _dfs_gap_plus_one_numba(
-    state: np.ndarray,
-    pos: np.ndarray,
-    depth: int,
-    target_len: int,
-    path: np.ndarray,
-    nodes: np.ndarray,
-    neutral_used: bool,
-) -> bool:
-    """DFS over paths with exactly one neutral move."""
-    nodes[0] += 1
-
-    if depth == target_len:
-        return neutral_used and _is_solved_numba(state)
-
-    count, move0, move1, move2 = _decreasing_candidates_numba(state, pos)
-
-    if count >= 1:
-        _apply_move_inplace_numba(state, pos, move0)
-        path[depth] = move0
-        found = _dfs_gap_plus_one_numba(
-            state,
-            pos,
-            depth + 1,
-            target_len,
-            path,
-            nodes,
-            neutral_used,
-        )
-        _apply_move_inplace_numba(state, pos, move0)
-        if found:
-            return True
-
-    if count >= 2:
-        _apply_move_inplace_numba(state, pos, move1)
-        path[depth] = move1
-        found = _dfs_gap_plus_one_numba(
-            state,
-            pos,
-            depth + 1,
-            target_len,
-            path,
-            nodes,
-            neutral_used,
-        )
-        _apply_move_inplace_numba(state, pos, move1)
-        if found:
-            return True
-
-    if count >= 3:
-        _apply_move_inplace_numba(state, pos, move2)
-        path[depth] = move2
-        found = _dfs_gap_plus_one_numba(
-            state,
-            pos,
-            depth + 1,
-            target_len,
-            path,
-            nodes,
-            neutral_used,
-        )
-        _apply_move_inplace_numba(state, pos, move2)
-        if found:
-            return True
-
-    if neutral_used:
-        return False
-
-    n_moves = state.shape[0] - 1
-    for move_code in range(n_moves):
-        if _delta_gap_for_move_numba(state, move_code) != 0:
-            continue
-
-        _apply_move_inplace_numba(state, pos, move_code)
-        if _has_decreasing_move_numba(state, pos):
-            path[depth] = move_code
-            found = _dfs_gap_numba(
-                state,
-                pos,
-                depth + 1,
-                target_len,
-                path,
-                nodes,
-            )
-            _apply_move_inplace_numba(state, pos, move_code)
-            if found:
-                return True
-        else:
-            _apply_move_inplace_numba(state, pos, move_code)
-
-    return False
-
-
-@njit(cache=False)
-def _verify_gap_exists_numba(start_state: np.ndarray) -> Tuple[bool, np.ndarray, int]:
-    """Return existence of a gap-length path."""
-    state = start_state.copy()
-    pos = _build_pos_numba(state)
-    target_len = _gap_count_numba(state)
-    path = np.empty(target_len, dtype=np.int16)
-    nodes = np.zeros(1, dtype=np.int64)
-    found = _dfs_gap_numba(state, pos, 0, target_len, path, nodes)
-    return found, path, nodes[0]
-
-
-@njit(cache=False)
-def _verify_gap_plus_one_exists_numba(
+def _verify_with_slack(
     start_state: np.ndarray,
-) -> Tuple[bool, np.ndarray, int]:
-    """Return existence of a gap+1 path."""
-    state = start_state.copy()
-    pos = _build_pos_numba(state)
-    target_len = _gap_count_numba(state) + 1
-    path = np.empty(target_len, dtype=np.int16)
-    nodes = np.zeros(1, dtype=np.int64)
-    found = _dfs_gap_plus_one_numba(
-        state,
-        pos,
-        0,
-        target_len,
-        path,
-        nodes,
-        False,
-    )
-    return found, path, nodes[0]
+    start_pos: np.ndarray,
+    work_state: np.ndarray,
+    work_pos: np.ndarray,
+    path: np.ndarray,
+    slack: int,
+    tt_capacity: int,
+    best_slack_by_state: dict[object, int],
+    tt_overflow: bool,
+) -> Tuple[bool, int, int, int, bool]:
+    """Return existence of a path within the given slack budget."""
+    np.copyto(work_state, start_state)
+    np.copyto(work_pos, start_pos)
+    nodes = 0
+    pruned = 0
+
+    def dfs(depth: int, slack_left: int, prev_move: int) -> int:
+        nonlocal nodes, pruned, tt_overflow
+        nodes += 1
+
+        if _is_solved_numba(work_state):
+            return depth
+
+        state_key = _state_key(work_state)
+        seen_slack = best_slack_by_state.get(state_key)
+        if seen_slack is not None and seen_slack >= slack_left:
+            pruned += 1
+            return -1
+
+        if seen_slack is None:
+            if len(best_slack_by_state) < tt_capacity:
+                best_slack_by_state[state_key] = slack_left
+            else:
+                tt_overflow = True
+        else:
+            best_slack_by_state[state_key] = slack_left
+
+        count, move0, move1, move2 = _decreasing_candidates_numba(
+            work_state,
+            work_pos,
+        )
+
+        if count >= 1 and move0 != prev_move:
+            _apply_move_inplace_numba(work_state, work_pos, move0)
+            path[depth] = move0
+            found_depth = dfs(depth + 1, slack_left, move0)
+            _apply_move_inplace_numba(work_state, work_pos, move0)
+            if found_depth >= 0:
+                return found_depth
+
+        if count >= 2 and move1 != prev_move:
+            _apply_move_inplace_numba(work_state, work_pos, move1)
+            path[depth] = move1
+            found_depth = dfs(depth + 1, slack_left, move1)
+            _apply_move_inplace_numba(work_state, work_pos, move1)
+            if found_depth >= 0:
+                return found_depth
+
+        if count >= 3 and move2 != prev_move:
+            _apply_move_inplace_numba(work_state, work_pos, move2)
+            path[depth] = move2
+            found_depth = dfs(depth + 1, slack_left, move2)
+            _apply_move_inplace_numba(work_state, work_pos, move2)
+            if found_depth >= 0:
+                return found_depth
+
+        if slack_left == 0:
+            return -1
+
+        n_moves = work_state.shape[0] - 1
+        for move_code in range(n_moves):
+            if move_code == prev_move:
+                continue
+            if _delta_gap_for_move_numba(work_state, move_code) != 0:
+                continue
+
+            _apply_move_inplace_numba(work_state, work_pos, move_code)
+            path[depth] = move_code
+            found_depth = dfs(depth + 1, slack_left - 1, move_code)
+            _apply_move_inplace_numba(work_state, work_pos, move_code)
+            if found_depth >= 0:
+                return found_depth
+
+        if slack_left == 1:
+            return -1
+
+        for move_code in range(n_moves):
+            if move_code == prev_move:
+                continue
+            if _delta_gap_for_move_numba(work_state, move_code) != 1:
+                continue
+
+            _apply_move_inplace_numba(work_state, work_pos, move_code)
+            path[depth] = move_code
+            found_depth = dfs(depth + 1, slack_left - 2, move_code)
+            _apply_move_inplace_numba(work_state, work_pos, move_code)
+            if found_depth >= 0:
+                return found_depth
+
+        return -1
+
+    path_len = dfs(0, slack, -1)
+    return path_len >= 0, path_len, nodes, pruned, tt_overflow
 
 
 class PancakeExactSolver(BaseSolver):
     """
-    The solver finds and certifies optimal pancake solutions with length equal to
-    the gap count, or gap count + n (where n is the exact_verify_margin, max is 2).
+    The solver finds and certifies optimal pancake solutions by validating an
+    incumbent and excluding all admissible shorter solutions down to the gap
+    lower bound.
 
-    The current solution is validated first. If its length equals the gap count,
-    it is already optimal. Otherwise the solver runs exhaustive depth-first search
-    over all admissible shorter paths. It first checks all decreasing-gap paths of
-    gap-count length. If the current solution has length gap count + 2, it then
-    checks all paths of length gap count + 1 with exactly one neutral move and
-    all remaining moves decreasing. If no path is found, then no shorter solution
-    exists in the verified range.
+    The exact search is formulated over the expanded state space
+    (perm, slack_left), where slack_left is the remaining budget above the
+    current gap lower bound. A gap-decreasing move consumes no slack, a neutral
+    move consumes one slack unit, and a gap-increasing move consumes two.
     """
 
     def __init__(
@@ -351,6 +282,7 @@ class PancakeExactSolver(BaseSolver):
         adapter: Any,
         incumbent_solver: BaseSolver,
         exact_verify_margin: int = 2,
+        exact_tt_capacity: int = 10_000_000,
         verbose: int = 0,
     ) -> None:
         """Store exact-solver dependencies."""
@@ -359,14 +291,20 @@ class PancakeExactSolver(BaseSolver):
                 "PancakeExactSolver only supports puzzle_type='pancake'; "
                 f"got {puzzle_spec.puzzle_type!r}"
             )
-        if exact_verify_margin >= 3:
-            raise NotImplementedError(
-                "exact_verify_margin >= 3 is not implemented yet."
+        if exact_verify_margin < 0:
+            raise ValueError("exact_verify_margin must be non-negative.")
+        if exact_tt_capacity <= 0:
+            raise ValueError("exact_tt_capacity must be positive.")
+        if puzzle_spec.state_size > np.iinfo(np.int16).max:
+            raise ValueError(
+                "PancakeExactSolver requires state_size <= 32767."
             )
         super().__init__(puzzle_spec, device, model=None, verbose=verbose)
         self.adapter = adapter
         self.incumbent_solver = incumbent_solver
+        self.exact_progress = ""
         self.exact_verify_margin = exact_verify_margin
+        self.exact_tt_capacity = exact_tt_capacity
         self._name_to_code = {
             name: code for code, name in enumerate(self.move_names)
         }
@@ -384,6 +322,9 @@ class PancakeExactSolver(BaseSolver):
             "gap0": -1,
             "exact_attempted": False,
             "exact_verify_margin": self.exact_verify_margin,
+            "exact_tt_capacity": self.exact_tt_capacity,
+            "exact_tt_size": 0,
+            "exact_tt_overflow": False,
             "exact_checked_from": -1,
             "exact_checked_to": -1,
             "exact_nodes_expanded": 0,
@@ -440,6 +381,7 @@ class PancakeExactSolver(BaseSolver):
     ) -> Tuple[bool, int, str]:
         """Validate incumbent and certify shorter lengths when requested."""
         self.reset()
+        self.exact_progress = ""
         self.model = model
         stats = self.search_stats
 
@@ -485,7 +427,7 @@ class PancakeExactSolver(BaseSolver):
         start_state_cpu = start_state.detach().cpu().contiguous()
         start_np = np.array(
             start_state_cpu.numpy(),
-            dtype=np.int64,
+            dtype=np.int16,
             copy=True,
             order="C",
         )
@@ -509,45 +451,54 @@ class PancakeExactSolver(BaseSolver):
 
         stats["exact_attempted"] = True
         stats["exact_checked_from"] = gap0
-        stats["exact_checked_to"] = min(best_len - 1, gap0 + 1)
+        stats["exact_checked_to"] = best_len - 1
         exact_start = time()
+        self.exact_progress = ""
 
-        found_gap, gap_path, gap_nodes = _verify_gap_exists_numba(start_np)
-        stats["exact_nodes_expanded"] += gap_nodes
+        max_shorter_slack = best_len - gap0 - 1
+        total_slack_steps = max_shorter_slack + 1
+        start_pos = _build_pos_numba(start_np)
+        work_state = start_np.copy()
+        work_pos = start_pos.copy()
+        path = np.empty(best_len - 1, dtype=np.int16)
+        best_slack_by_state: dict[object, int] = {}
+        tt_overflow = False
 
-        if found_gap:
-            stats["exact_time"] = time() - exact_start
-            stats["exact_found"] = True
-            stats["exact_found_len"] = gap0
-            stats["exact_status"] = "found_exact_improvement"
-            stats["path_found"] = True
-            return True, gap0, self._codes_to_solution(gap_path, len(gap_path))
-
-        if best_len == gap0 + 1:
-            stats["exact_time"] = time() - exact_start
-            stats["exact_status"] = "proved_optimal_in_range"
-            stats["path_found"] = True
-            return True, best_len, best_solution
-
-        if best_len != gap0 + 2:
-            raise RuntimeError("Internal error: unexpected exact branch.")
-
-        found_gap1, gap1_path, gap1_nodes = _verify_gap_plus_one_exists_numba(
-            start_np
-        )
-        stats["exact_nodes_expanded"] += gap1_nodes
-        stats["exact_time"] = time() - exact_start
-
-        if found_gap1:
-            stats["exact_found"] = True
-            stats["exact_found_len"] = gap0 + 1
-            stats["exact_status"] = "found_exact_improvement"
-            stats["path_found"] = True
-            return True, gap0 + 1, self._codes_to_solution(
-                gap1_path,
-                len(gap1_path),
+        for slack in range(total_slack_steps):
+            found_shorter, path_len, nodes, pruned, tt_overflow = (
+                _verify_with_slack(
+                    start_np,
+                    start_pos,
+                    work_state,
+                    work_pos,
+                    path,
+                    slack,
+                    self.exact_tt_capacity,
+                    best_slack_by_state,
+                    tt_overflow,
+                )
             )
+            if self.verbose > 0 and slack > 0:
+                elapsed = time() - exact_start
+                n_exp = stats["exact_nodes_expanded"] + nodes
+                self.exact_progress = (
+                    f"| ex {gap0}..{best_len - 1} {slack + 1}/{total_slack_steps} "
+                    f"{n_exp:,}n {elapsed:.1f}s"
+                )
+            stats["exact_nodes_expanded"] += nodes
+            stats["exact_pruned_by_transposition"] += pruned
+            stats["exact_tt_size"] = len(best_slack_by_state)
+            stats["exact_tt_overflow"] = tt_overflow
 
+            if found_shorter:
+                stats["exact_time"] = time() - exact_start
+                stats["exact_found"] = True
+                stats["exact_found_len"] = path_len
+                stats["exact_status"] = "found_exact_improvement"
+                stats["path_found"] = True
+                return True, path_len, self._codes_to_solution(path, path_len)
+
+        stats["exact_time"] = time() - exact_start
         stats["exact_status"] = "proved_optimal_in_range"
         stats["path_found"] = True
         return True, best_len, best_solution
