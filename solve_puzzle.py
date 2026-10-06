@@ -253,6 +253,7 @@ def train_model_if_needed(
     if rw_type == "beam_nbt":
         X, y = rw_fun(
             puzzle_spec.move_indices,
+            initial_state=puzzle_spec.solved_state,
             n_steps=rw_steps,
             n_walks=config.train.n_walks,
             device=device,

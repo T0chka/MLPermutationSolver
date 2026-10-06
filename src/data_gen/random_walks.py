@@ -26,16 +26,16 @@ def create_lrx_moves(state_size: int) -> List[List[int]]:
 
 def first_visit_random_walks(
     generators: list,
+    initial_state: torch.Tensor,
     n_steps: int,
     n_walks: int,
-    device: torch.device
+    device: torch.device,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Generates random walks from identity permutation,
-    tracks when each state was first visited,
-    returns the sequence of visited states and their first occurrence step.
+    Generate random walks from the provided initial state, track first visits,
+    and return visited states with their first occurrence step.
     """
-    state_size = len(generators[0])
+    state_size = int(initial_state.numel())
     all_moves = _as_move_tensor(generators, device, dtype=torch.long)
 
     # initialize
@@ -48,9 +48,9 @@ def first_visit_random_walks(
     ).unsqueeze(1).expand(n_steps, n_walks).reshape(-1)
     
     # starting states
-    current_states = torch.arange(
-        state_size, device=device
-    ).unsqueeze(0).expand(n_walks, state_size).clone()
+    current_states = initial_state.to(
+        device=device, dtype=torch.long
+    ).view(1, state_size).expand(n_walks, state_size).clone()
     X[:n_walks] = current_states
 
     # simulate random walks
@@ -88,16 +88,19 @@ def first_visit_random_walks(
 
 def nbt_random_walks(
     generators: list,
+    initial_state: torch.Tensor,
     n_steps: int,
     n_walks: int,
-    device: torch.device
+    device: torch.device,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Generate non-backtracking random walks from identity permutation"""
-    state_size = len(generators[0])
+    """Generate non-backtracking random walks from the provided initial state."""
+    state_size = int(initial_state.numel())
     all_moves = _as_move_tensor(generators, device, dtype=torch.long)
     
     # initialize starting states
-    current_states = torch.arange(state_size, device=device).repeat(n_walks, 1)
+    current_states = initial_state.to(
+        device=device, dtype=torch.long
+    ).view(1, state_size).expand(n_walks, state_size).clone()
     
     # create hash vector for state tracking
     hash_vec = torch.randint(
@@ -172,21 +175,22 @@ def nbt_random_walks(
 
 def random_walks_beam_nbt(
     generators: list,
+    initial_state: torch.Tensor,
     n_steps: int,
     n_walks: int,
     device: torch.device,
     nbt_depth: int = None,
     dtype: str = 'auto',
-    verbose: bool = False
+    verbose: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Generate non-backtracking random walks from identity permutation.    
+    Generate non-backtracking random walks from the provided initial state.
     Uses beam search approach where states visited by any trajectory are banned for all.
     """
     if not nbt_depth:
         nbt_depth = n_steps
     
-    state_size = len(generators[0])
+    state_size = int(initial_state.numel())
     n_generators = len(generators)
     
     # Convert generators to tensor
@@ -196,10 +200,10 @@ def random_walks_beam_nbt(
     if isinstance(dtype, str) and dtype.lower() == 'auto':
         dtype = torch.uint8 if state_size <= 256 else torch.uint16
     
-    # Create initial state (identity permutation)
-    initial_state = torch.arange(
-        state_size, device=device, dtype=dtype
-    ).reshape(-1, state_size)
+    # Move initial state to the requested representation.
+    initial_state = initial_state.to(
+        device=device, dtype=dtype
+    ).reshape(1, state_size)
     
     # Create hash vector for fast state comparison
     hash_vector = torch.randint(

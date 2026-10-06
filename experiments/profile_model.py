@@ -166,8 +166,15 @@ def main():
     # Generate training data
     print(f"Generating data with {args.rw_type} random walks...")
     generators = create_lrx_moves(args.state_size)
+    initial_state = torch.arange(args.state_size, device=device)
     func = rw_functions[args.rw_type]
-    X, y = func(generators, n_steps=conj_steps, n_walks=args.n_walks, device=device)
+    X, y = func(
+        generators,
+        initial_state=initial_state,
+        n_steps=conj_steps,
+        n_walks=args.n_walks,
+        device=device,
+    )
     print(f"Generated dataset with {X.shape[0]} samples")
     
     # Initialize and train model

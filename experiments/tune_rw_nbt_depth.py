@@ -177,12 +177,14 @@ for _, row in test_df.iterrows():
             print(f"\nRun {run} for n={size}, nbt_depth={nbt_depth}")
             
             # Generate data and train model
-            generators = create_lrx_moves(size)
+            puzzle_spec = make_lrx_spec(size, DEVICE)
+            generators = puzzle_spec.move_indices
             model = model_classes[EXPERIMENT_PARAMS['model_name']]()
             
             start_time = time()
             X, y = rw_fun(
-                generators, 
+                generators,
+                initial_state=puzzle_spec.solved_state,
                 n_steps=conj_steps, 
                 n_walks=EXPERIMENT_PARAMS['n_walks'], 
                 nbt_depth=nbt_depth,
@@ -204,7 +206,6 @@ for _, row in test_df.iterrows():
             
             print(f"Training completed in {train_time:.2f}s")
             
-            puzzle_spec = make_lrx_spec(size, DEVICE)
             adapter = get_adapter("lrx", puzzle_spec, DEVICE)
             solver = make_solver(
                 puzzle_spec,

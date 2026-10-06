@@ -36,13 +36,13 @@ RESULTS_DIR = Path(__file__).resolve().parent / "BS_results" / "optimize_random_
 BFS_EVAL_STATES = 2_000_000
 BFS_EVAL_SEED = 0
 
-def run_test(func, generators, n_steps, n_walks, device):
+def run_test(func, generators, initial_state, n_steps, n_walks, device):
     """Run a single test with given parameters."""
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
     
     start_time = time.time()
-    X, y = func(generators, n_steps, n_walks, device)
+    X, y = func(generators, initial_state, n_steps, n_walks, device)
     end_time = time.time()
     
     elapsed_time = end_time - start_time
@@ -223,6 +223,7 @@ def main():
     
     # Generate test data
     generators = create_lrx_moves(args.state_size)
+    initial_state = torch.arange(args.state_size, device=device)
     
     # Compute BFS distances for ground truth and sample eval set
     print(f"Computing BFS distances for state size {args.state_size}", end=" ", flush=True)
@@ -282,7 +283,9 @@ def main():
                 print(f"Testing n_steps={n_steps}, n_walks={n_walks}...")
                 try:
                     # Run the random walk
-                    result = run_test(func, generators, n_steps, n_walks, device)
+                    result = run_test(
+                        func, generators, initial_state, n_steps, n_walks, device
+                    )
                     
                     # Train and evaluate model
                     X_train, y_train = result['X'], result['y']

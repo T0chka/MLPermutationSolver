@@ -26,6 +26,7 @@ RESULTS_DIR = Path(__file__).resolve().parent / "BS_results" / "benchmark_random
 def run_benchmark(
     func: Callable,
     generators: List[Callable],
+    initial_state: torch.Tensor,
     n_steps: int,
     n_walks: int,
     device: torch.device,
@@ -46,14 +47,14 @@ def run_benchmark(
     
     # Warm-up run
     torch.cuda.empty_cache()
-    _ = func(generators, n_steps, n_walks, device)
+    _ = func(generators, initial_state, n_steps, n_walks, device)
     
     for run in range(n_runs):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         
         start_time = time.time()
-        X, y = func(generators, n_steps, n_walks, device)
+        X, y = func(generators, initial_state, n_steps, n_walks, device)
         end_time = time.time()
         
         times.append(end_time - start_time)
@@ -193,6 +194,7 @@ def main():
     
     # Generate test data
     generators = create_lrx_moves(args.state_size)
+    initial_state = torch.arange(args.state_size, device=device)
     
     # Define functions to benchmark
     functions = {
@@ -207,7 +209,8 @@ def main():
         print(f"Benchmarking {name}...")
         try:
             results[name] = run_benchmark(
-                func, generators, args.n_steps, args.n_walks, device, args.n_runs
+                func, generators, initial_state, args.n_steps, args.n_walks,
+                device, args.n_runs
             )
             print(f"  - Average time: {results[name]['avg_time']:.4f}s")
             print(f"  - Data points: {results[name]['avg_data_points']:.0f}")
