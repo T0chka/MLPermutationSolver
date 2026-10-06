@@ -26,11 +26,11 @@ from src.utils import assert_solution_sorts_state
 
 @dataclass
 class InputConfig:
-    puzzle: str = "lrx"
+    puzzle: str = "pancake"
     # "pancake" | "lrx"
 
     state: Optional[list[int]] = field(
-        default_factory=lambda: [1, 0, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2]
+        default_factory=lambda: [0,1,4,7,6,5,9,8,2,3]
     )
     # None = generate a random permutation.
     # list[int] = solve exactly this permutation.
@@ -82,7 +82,7 @@ class TrainConfig:
 
 @dataclass
 class AdapterConfig:
-    pancake_max_moves: int = 0
+    pancake_max_moves: int = 3
     # Pancake only.
     # 0 means "use adapter default full move budget".
     # Internally this still passes through adapter policy logic:
@@ -102,7 +102,7 @@ class SearchConfig:
     # "beam" | "pancake_exact"
     # pancake_exact is supported only for puzzle == "pancake".
 
-    beam_width: int = 2**18
+    beam_width: int = 2**12
     # Beam width for beam-based search.
 
     max_steps: int = None
