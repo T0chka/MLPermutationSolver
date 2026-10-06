@@ -27,6 +27,7 @@ from src.solvers.base_solver import BaseSolver
 
 
 @njit(cache=False)  # cache=True + torch in process causes segfault on 2nd call
+
 def _gap_count_numba(state: np.ndarray) -> int:
     """Return plate gap count."""
     n = state.shape[0]
@@ -134,132 +135,297 @@ def _decreasing_candidates_numba(
     return count, move0, move1, move2
 
 
-def _state_key(state: np.ndarray) -> int | tuple[int, ...]:
-    """Pack a state into 64-bit words for TT lookup."""
-    word = 0
-    shift = 0
-    words: list[int] = []
+@njit(cache=False)
+def _pack_state_key_numba(
+    state: np.ndarray,
+    bits_per_value: int,
+    key_words: np.ndarray,
+) -> None:
+    """Pack a state into fixed 64-bit words."""
+    for word_idx in range(key_words.shape[0]):
+        key_words[word_idx] = np.uint64(0)
 
-    for value in state:
-        word |= int(value) << shift
-        shift += 16
-        if shift == 64:
-            words.append(word)
-            word = 0
-            shift = 0
-
-    if shift != 0:
-        words.append(word)
-
-    if len(words) == 1:
-        return words[0]
-    return tuple(words)
+    for idx in range(state.shape[0]):
+        value = np.uint64(state[idx])
+        bit_pos = idx * bits_per_value
+        word_idx = bit_pos >> 6
+        bit_shift = bit_pos & 63
+        key_words[word_idx] |= value << np.uint64(bit_shift)
+        if bit_shift + bits_per_value > 64:
+            spill_shift = np.uint64(64 - bit_shift)
+            key_words[word_idx + 1] |= value >> spill_shift
 
 
-def _verify_with_slack(
+@njit(cache=False)
+def _hash_key_words_numba(key_words: np.ndarray) -> np.uint64:
+    """Hash packed state words."""
+    value = np.uint64(0x9E3779B97F4A7C15)
+    for idx in range(key_words.shape[0]):
+        value ^= key_words[idx] + np.uint64(0x9E3779B97F4A7C15)
+        value ^= value >> np.uint64(30)
+        value *= np.uint64(0xBF58476D1CE4E5B9)
+        value ^= value >> np.uint64(27)
+        value *= np.uint64(0x94D049BB133111EB)
+        value ^= value >> np.uint64(31)
+    return value
+
+
+@njit(cache=False)
+def _tt_find_slot_numba(
+    key_words: np.ndarray,
+    tt_used: np.ndarray,
+    tt_keys: np.ndarray,
+    tt_best_slack: np.ndarray,
+    tt_mask: int,
+) -> Tuple[bool, int, int]:
+    """Find TT slot for a packed key."""
+    slot = np.int64(_hash_key_words_numba(key_words) & np.uint64(tt_mask))
+
+    while True:
+        if tt_used[slot] == 0:
+            return False, int(slot), -1
+
+        is_match = True
+        for word_idx in range(key_words.shape[0]):
+            if tt_keys[slot, word_idx] != key_words[word_idx]:
+                is_match = False
+                break
+
+        if is_match:
+            return True, int(slot), int(tt_best_slack[slot])
+
+        slot = np.int64((slot + 1) & tt_mask)
+
+
+@njit(cache=False)
+def _verify_shorter_paths_numba(
     start_state: np.ndarray,
-    start_pos: np.ndarray,
-    work_state: np.ndarray,
-    work_pos: np.ndarray,
-    path: np.ndarray,
-    slack: int,
+    max_shorter_slack: int,
     tt_capacity: int,
-    best_slack_by_state: dict[object, int],
-    tt_overflow: bool,
-) -> Tuple[bool, int, int, int, bool]:
-    """Return existence of a path within the given slack budget."""
-    np.copyto(work_state, start_state)
-    np.copyto(work_pos, start_pos)
-    nodes = 0
-    pruned = 0
+    tt_slots: int,
+    bits_per_value: int,
+) -> Tuple[bool, np.ndarray, int, int, int, int, bool]:
+    """Return existence of any shorter path within the slack range."""
+    n = start_state.shape[0]
+    gap0 = _gap_count_numba(start_state)
+    max_depth = gap0 + max_shorter_slack
+    n_moves = n - 1
+    n_key_words = (n * bits_per_value + 63) // 64
 
-    def dfs(depth: int, slack_left: int, prev_move: int) -> int:
-        nonlocal nodes, pruned, tt_overflow
-        nodes += 1
+    path = np.empty(max_depth, dtype=np.int16)
+    start_pos = _build_pos_numba(start_state)
+    state_stack = np.empty((max_depth + 1, n), dtype=np.int16)
+    pos_stack = np.empty((max_depth + 1, n), dtype=np.int16)
+    stage_stack = np.zeros(max_depth + 1, dtype=np.int8)
+    next_index_stack = np.zeros(max_depth + 1, dtype=np.int16)
+    dec_count_stack = np.zeros(max_depth + 1, dtype=np.int8)
+    dec_moves_stack = np.full((max_depth + 1, 3), -1, dtype=np.int16)
+    slack_stack = np.zeros(max_depth + 1, dtype=np.int16)
+    prev_move_stack = np.full(max_depth + 1, -1, dtype=np.int16)
+    key_words = np.zeros(n_key_words, dtype=np.uint64)
+    tt_used = np.zeros(tt_slots, dtype=np.uint8)
+    tt_keys = np.zeros((tt_slots, n_key_words), dtype=np.uint64)
+    tt_best_slack = np.full(tt_slots, -1, dtype=np.int16)
 
-        if _is_solved_numba(work_state):
-            return depth
+    tt_mask = tt_slots - 1
+    tt_size = 0
+    tt_overflow = False
+    total_nodes = 0
+    total_pruned = 0
 
-        state_key = _state_key(work_state)
-        seen_slack = best_slack_by_state.get(state_key)
-        if seen_slack is not None and seen_slack >= slack_left:
-            pruned += 1
-            return -1
+    for root_slack in range(max_shorter_slack + 1):
+        state_stack[0, :] = start_state
+        pos_stack[0, :] = start_pos
+        stage_stack[0] = 0
+        next_index_stack[0] = 0
+        slack_stack[0] = root_slack
+        prev_move_stack[0] = -1
+        depth = 0
 
-        if seen_slack is None:
-            if len(best_slack_by_state) < tt_capacity:
-                best_slack_by_state[state_key] = slack_left
-            else:
-                tt_overflow = True
-        else:
-            best_slack_by_state[state_key] = slack_left
+        while True:
+            stage = stage_stack[depth]
 
-        count, move0, move1, move2 = _decreasing_candidates_numba(
-            work_state,
-            work_pos,
-        )
+            if stage == 0:
+                total_nodes += 1
+                current_state = state_stack[depth]
 
-        if count >= 1 and move0 != prev_move:
-            _apply_move_inplace_numba(work_state, work_pos, move0)
-            path[depth] = move0
-            found_depth = dfs(depth + 1, slack_left, move0)
-            _apply_move_inplace_numba(work_state, work_pos, move0)
-            if found_depth >= 0:
-                return found_depth
+                if _is_solved_numba(current_state):
+                    return (
+                        True,
+                        path,
+                        depth,
+                        total_nodes,
+                        total_pruned,
+                        tt_size,
+                        tt_overflow,
+                    )
 
-        if count >= 2 and move1 != prev_move:
-            _apply_move_inplace_numba(work_state, work_pos, move1)
-            path[depth] = move1
-            found_depth = dfs(depth + 1, slack_left, move1)
-            _apply_move_inplace_numba(work_state, work_pos, move1)
-            if found_depth >= 0:
-                return found_depth
+                _pack_state_key_numba(
+                    current_state,
+                    bits_per_value,
+                    key_words,
+                )
+                seen, slot, seen_slack = _tt_find_slot_numba(
+                    key_words,
+                    tt_used,
+                    tt_keys,
+                    tt_best_slack,
+                    tt_mask,
+                )
+                slack_left = int(slack_stack[depth])
 
-        if count >= 3 and move2 != prev_move:
-            _apply_move_inplace_numba(work_state, work_pos, move2)
-            path[depth] = move2
-            found_depth = dfs(depth + 1, slack_left, move2)
-            _apply_move_inplace_numba(work_state, work_pos, move2)
-            if found_depth >= 0:
-                return found_depth
+                if seen and seen_slack >= slack_left:
+                    total_pruned += 1
+                    stage_stack[depth] = 4
+                    continue
 
-        if slack_left == 0:
-            return -1
+                if seen:
+                    tt_best_slack[slot] = np.int16(slack_left)
+                elif tt_size < tt_capacity:
+                    tt_used[slot] = 1
+                    for word_idx in range(n_key_words):
+                        tt_keys[slot, word_idx] = key_words[word_idx]
+                    tt_best_slack[slot] = np.int16(slack_left)
+                    tt_size += 1
+                else:
+                    tt_overflow = True
 
-        n_moves = work_state.shape[0] - 1
-        for move_code in range(n_moves):
-            if move_code == prev_move:
+                count, move0, move1, move2 = _decreasing_candidates_numba(
+                    current_state,
+                    pos_stack[depth],
+                )
+                dec_count_stack[depth] = count
+                dec_moves_stack[depth, 0] = move0
+                dec_moves_stack[depth, 1] = move1
+                dec_moves_stack[depth, 2] = move2
+                next_index_stack[depth] = 0
+                stage_stack[depth] = 1
                 continue
-            if _delta_gap_for_move_numba(work_state, move_code) != 0:
+
+            if stage == 1:
+                next_index = int(next_index_stack[depth])
+                dec_count = int(dec_count_stack[depth])
+                moved = False
+
+                while next_index < dec_count:
+                    move_code = int(dec_moves_stack[depth, next_index])
+                    next_index += 1
+                    if move_code == int(prev_move_stack[depth]):
+                        continue
+
+                    next_index_stack[depth] = np.int16(next_index)
+                    state_stack[depth + 1, :] = state_stack[depth, :]
+                    pos_stack[depth + 1, :] = pos_stack[depth, :]
+                    _apply_move_inplace_numba(
+                        state_stack[depth + 1],
+                        pos_stack[depth + 1],
+                        move_code,
+                    )
+                    path[depth] = move_code
+                    slack_stack[depth + 1] = slack_stack[depth]
+                    prev_move_stack[depth + 1] = np.int16(move_code)
+                    stage_stack[depth + 1] = 0
+                    next_index_stack[depth + 1] = 0
+                    depth += 1
+                    moved = True
+                    break
+
+                if moved:
+                    continue
+
+                if slack_stack[depth] == 0:
+                    stage_stack[depth] = 4
+                else:
+                    stage_stack[depth] = 2
+                    next_index_stack[depth] = 0
                 continue
 
-            _apply_move_inplace_numba(work_state, work_pos, move_code)
-            path[depth] = move_code
-            found_depth = dfs(depth + 1, slack_left - 1, move_code)
-            _apply_move_inplace_numba(work_state, work_pos, move_code)
-            if found_depth >= 0:
-                return found_depth
+            if stage == 2:
+                next_index = int(next_index_stack[depth])
+                moved = False
 
-        if slack_left == 1:
-            return -1
+                while next_index < n_moves:
+                    move_code = next_index
+                    next_index += 1
+                    if move_code == int(prev_move_stack[depth]):
+                        continue
+                    if _delta_gap_for_move_numba(
+                        state_stack[depth],
+                        move_code,
+                    ) != 0:
+                        continue
 
-        for move_code in range(n_moves):
-            if move_code == prev_move:
+                    next_index_stack[depth] = np.int16(next_index)
+                    state_stack[depth + 1, :] = state_stack[depth, :]
+                    pos_stack[depth + 1, :] = pos_stack[depth, :]
+                    _apply_move_inplace_numba(
+                        state_stack[depth + 1],
+                        pos_stack[depth + 1],
+                        move_code,
+                    )
+                    path[depth] = move_code
+                    slack_stack[depth + 1] = np.int16(slack_stack[depth] - 1)
+                    prev_move_stack[depth + 1] = np.int16(move_code)
+                    stage_stack[depth + 1] = 0
+                    next_index_stack[depth + 1] = 0
+                    depth += 1
+                    moved = True
+                    break
+
+                if moved:
+                    continue
+
+                if slack_stack[depth] == 1:
+                    stage_stack[depth] = 4
+                else:
+                    stage_stack[depth] = 3
+                    next_index_stack[depth] = 0
                 continue
-            if _delta_gap_for_move_numba(work_state, move_code) != 1:
+
+            if stage == 3:
+                next_index = int(next_index_stack[depth])
+                moved = False
+
+                while next_index < n_moves:
+                    move_code = next_index
+                    next_index += 1
+                    if move_code == int(prev_move_stack[depth]):
+                        continue
+                    if _delta_gap_for_move_numba(
+                        state_stack[depth],
+                        move_code,
+                    ) != 1:
+                        continue
+
+                    next_index_stack[depth] = np.int16(next_index)
+                    state_stack[depth + 1, :] = state_stack[depth, :]
+                    pos_stack[depth + 1, :] = pos_stack[depth, :]
+                    _apply_move_inplace_numba(
+                        state_stack[depth + 1],
+                        pos_stack[depth + 1],
+                        move_code,
+                    )
+                    path[depth] = move_code
+                    slack_stack[depth + 1] = np.int16(slack_stack[depth] - 2)
+                    prev_move_stack[depth + 1] = np.int16(move_code)
+                    stage_stack[depth + 1] = 0
+                    next_index_stack[depth + 1] = 0
+                    depth += 1
+                    moved = True
+                    break
+
+                if moved:
+                    continue
+
+                stage_stack[depth] = 4
                 continue
 
-            _apply_move_inplace_numba(work_state, work_pos, move_code)
-            path[depth] = move_code
-            found_depth = dfs(depth + 1, slack_left - 2, move_code)
-            _apply_move_inplace_numba(work_state, work_pos, move_code)
-            if found_depth >= 0:
-                return found_depth
+            if depth == 0:
+                break
 
-        return -1
+            depth -= 1
 
-    path_len = dfs(0, slack, -1)
-    return path_len >= 0, path_len, nodes, pruned, tt_overflow
+    return False, path, -1, total_nodes, total_pruned, tt_size, tt_overflow
 
 
 class PancakeExactSolver(BaseSolver):
@@ -282,7 +448,7 @@ class PancakeExactSolver(BaseSolver):
         adapter: Any,
         incumbent_solver: BaseSolver,
         exact_verify_margin: int = 2,
-        exact_tt_capacity: int = 10_000_000,
+        exact_tt_capacity: int = 100_000_000,
         verbose: int = 0,
     ) -> None:
         """Store exact-solver dependencies."""
@@ -305,6 +471,8 @@ class PancakeExactSolver(BaseSolver):
         self.exact_progress = ""
         self.exact_verify_margin = exact_verify_margin
         self.exact_tt_capacity = exact_tt_capacity
+        self._exact_tt_slots = _next_power_of_two(exact_tt_capacity * 2)
+        self._bits_per_value = max(1, (puzzle_spec.state_size - 1).bit_length())
         self._name_to_code = {
             name: code for code, name in enumerate(self.move_names)
         }
@@ -453,52 +621,49 @@ class PancakeExactSolver(BaseSolver):
         stats["exact_checked_from"] = gap0
         stats["exact_checked_to"] = best_len - 1
         exact_start = time()
-        self.exact_progress = ""
-
         max_shorter_slack = best_len - gap0 - 1
-        total_slack_steps = max_shorter_slack + 1
-        start_pos = _build_pos_numba(start_np)
-        work_state = start_np.copy()
-        work_pos = start_pos.copy()
-        path = np.empty(best_len - 1, dtype=np.int16)
-        best_slack_by_state: dict[object, int] = {}
-        tt_overflow = False
-
-        for slack in range(total_slack_steps):
-            found_shorter, path_len, nodes, pruned, tt_overflow = (
-                _verify_with_slack(
-                    start_np,
-                    start_pos,
-                    work_state,
-                    work_pos,
-                    path,
-                    slack,
-                    self.exact_tt_capacity,
-                    best_slack_by_state,
-                    tt_overflow,
-                )
-            )
-            if self.verbose > 0 and slack > 0:
-                elapsed = time() - exact_start
-                n_exp = stats["exact_nodes_expanded"] + nodes
-                self.exact_progress = (
-                    f"| ex {gap0}..{best_len - 1} {slack + 1}/{total_slack_steps} "
-                    f"{n_exp:,}n {elapsed:.1f}s"
-                )
-            stats["exact_nodes_expanded"] += nodes
-            stats["exact_pruned_by_transposition"] += pruned
-            stats["exact_tt_size"] = len(best_slack_by_state)
-            stats["exact_tt_overflow"] = tt_overflow
-
-            if found_shorter:
-                stats["exact_time"] = time() - exact_start
-                stats["exact_found"] = True
-                stats["exact_found_len"] = path_len
-                stats["exact_status"] = "found_exact_improvement"
-                stats["path_found"] = True
-                return True, path_len, self._codes_to_solution(path, path_len)
-
+        (
+            found_shorter,
+            path,
+            path_len,
+            nodes,
+            pruned,
+            tt_size,
+            overflowed,
+        ) = _verify_shorter_paths_numba(
+            start_np,
+            max_shorter_slack,
+            self.exact_tt_capacity,
+            self._exact_tt_slots,
+            self._bits_per_value,
+        )
         stats["exact_time"] = time() - exact_start
+        stats["exact_nodes_expanded"] = nodes
+        stats["exact_pruned_by_transposition"] = pruned
+        stats["exact_tt_size"] = tt_size
+        stats["exact_tt_overflow"] = overflowed
+
+        if self.verbose > 0 and max_shorter_slack > 0 and nodes > 0:
+            elapsed = time() - exact_start
+            self.exact_progress = (
+                f"| ex {gap0}..{best_len - 1} {max_shorter_slack + 1} steps "
+                f"{nodes:,}n {elapsed:.1f}s"
+            )
+
+        if found_shorter:
+            stats["exact_found"] = True
+            stats["exact_found_len"] = path_len
+            stats["exact_status"] = "found_exact_improvement"
+            stats["path_found"] = True
+            return True, path_len, self._codes_to_solution(path, path_len)
+
         stats["exact_status"] = "proved_optimal_in_range"
         stats["path_found"] = True
         return True, best_len, best_solution
+
+
+def _next_power_of_two(value: int) -> int:
+    """Return the next power of two."""
+    if value <= 1:
+        return 1
+    return 1 << (value - 1).bit_length()
