@@ -71,9 +71,51 @@ def get_adapter(
         )
     if puzzle_type == "lrx":
         return LRXAdapter(puzzle_spec=puzzle_spec, device=device)
+    if puzzle_type == "generic":
+        return GenericAdapter(puzzle_spec=puzzle_spec, device=device)
     raise ValueError(
-        f"Unknown puzzle_type={puzzle_type!r}; expected 'pancake' or 'lrx'"
+        "Unknown puzzle_type="
+        f"{puzzle_type!r}; expected 'pancake', 'lrx', or 'generic'"
     )
+
+
+class GenericAdapter:
+    """Generic adapter with all moves enabled and no puzzle-specific bound."""
+
+    def __init__(self, puzzle_spec: PuzzleSpec, device: torch.device) -> None:
+        self.puzzle_spec = puzzle_spec
+        self.device = device
+        self.logger = None
+        self.n_moves = int(puzzle_spec.move_indices.size(0))
+        self.moves_per_state = self.n_moves
+
+    def prepare_search(self, start_state: torch.Tensor) -> None:
+        """Prepare a search; generic puzzles require no per-target state."""
+
+    def lower_bound(self, states: torch.Tensor, direction: str) -> torch.Tensor:
+        """Return the trivial admissible lower bound for a generic puzzle."""
+        return torch.zeros(states.size(0), dtype=torch.long, device=self.device)
+
+    def set_logger(self, logger: Any) -> None:
+        """Inject solver logger."""
+        self.logger = logger
+
+    def move_codes_and_mask(
+        self,
+        states: torch.Tensor,
+        direction: str,
+        **policy_options: Any,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        n_states = int(states.size(0))
+        max_moves = int(policy_options.get("max_moves", self.n_moves))
+        max_moves = min(max(max_moves, 1), self.n_moves)
+        move_codes = torch.arange(
+            max_moves, device=self.device, dtype=torch.long
+        ).unsqueeze(0).expand(n_states, -1)
+        valid_mask = torch.ones(
+            (n_states, max_moves), device=self.device, dtype=torch.bool
+        )
+        return move_codes, valid_mask
 
 
 class PancakeAdapter:
