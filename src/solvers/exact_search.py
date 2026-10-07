@@ -8,7 +8,9 @@ import numpy as np
 from numba import njit
 
 from src.solvers.exact_kernels import (
+    KERNEL_CUBE555_STRUCTURAL,
     KERNEL_PANCAKE_GAP,
+    _cube555_inner_parity_numba,
     apply_pancake_move_inplace_numba,
     apply_permutation_move_numba,
     build_pos_numba,
@@ -98,6 +100,10 @@ def verify_shorter_paths_numba(
     inner_goal_piece_mask: np.ndarray,
     inner_dual_cut_indices: np.ndarray,
     inner_dual_weights_x4: np.ndarray,
+    inner_parity_orbit_positions: np.ndarray,
+    inner_parity_orbit_lengths: np.ndarray,
+    inner_parity_goal_local_by_piece: np.ndarray,
+    inner_parity_move_toggle: np.ndarray,
     corner_orientation_count: int,
     tt_capacity: int,
     tt_slots: int,
@@ -124,6 +130,7 @@ def verify_shorter_paths_numba(
     next_index = np.zeros(max_depth + 1, dtype=np.int16)
     entered = np.zeros(max_depth + 1, dtype=np.uint8)
     previous_move = np.full(max_depth + 1, -1, dtype=np.int16)
+    inner_parity_stack = np.zeros(max_depth + 1, dtype=np.uint8)
 
     key_words = np.zeros(n_key_words, dtype=np.uint64)
     tt_used = np.zeros(tt_slots, dtype=np.uint8)
@@ -137,6 +144,16 @@ def verify_shorter_paths_numba(
     pruned_by_lower_bound = 0
     pruned_by_transposition = 0
     start_pos = build_pos_numba(start_state)
+    root_inner_parity = 0
+    if kernel_kind == KERNEL_CUBE555_STRUCTURAL:
+        root_inner_parity = _cube555_inner_parity_numba(
+            start_state,
+            inner_parity_orbit_positions,
+            inner_parity_orbit_lengths,
+            inner_parity_goal_local_by_piece,
+        )
+        if root_inner_parity < 0:
+            root_inner_parity = 0
 
     for target_length in range(first_length, last_length + 1):
         state_stack[0, :] = start_state
@@ -144,6 +161,7 @@ def verify_shorter_paths_numba(
         entered[0] = 0
         next_index[0] = 0
         previous_move[0] = -1
+        inner_parity_stack[0] = np.uint8(root_inner_parity)
         depth = 0
 
         while depth >= 0:
@@ -183,6 +201,7 @@ def verify_shorter_paths_numba(
                     inner_goal_piece_mask,
                     inner_dual_cut_indices,
                     inner_dual_weights_x4,
+                    int(inner_parity_stack[depth]),
                     corner_orientation_count,
                 )
                 if lower_bound > remaining:
@@ -258,6 +277,10 @@ def verify_shorter_paths_numba(
                     move_indices,
                     move_code,
                 )
+
+            inner_parity_stack[depth + 1] = inner_parity_stack[depth]
+            if inner_parity_move_toggle.shape[0] > 0:
+                inner_parity_stack[depth + 1] ^= inner_parity_move_toggle[move_code]
 
             path[depth] = np.int16(move_code)
             previous_move[depth + 1] = np.int16(move_code)

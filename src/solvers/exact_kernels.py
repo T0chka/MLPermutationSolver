@@ -43,6 +43,10 @@ class ExactKernel:
     inner_goal_piece_mask: np.ndarray
     inner_dual_cut_indices: np.ndarray
     inner_dual_weights_x4: np.ndarray
+    inner_parity_orbit_positions: np.ndarray
+    inner_parity_orbit_lengths: np.ndarray
+    inner_parity_goal_local_by_piece: np.ndarray
+    inner_parity_move_toggle: np.ndarray
     corner_orientation_count: int
 
 
@@ -62,6 +66,10 @@ def _empty_cube555_kernel_fields() -> dict[str, Any]:
         "inner_goal_piece_mask": np.empty((0, 0), dtype=np.uint8),
         "inner_dual_cut_indices": np.empty((0, 2), dtype=np.int16),
         "inner_dual_weights_x4": np.empty((0, 2), dtype=np.int16),
+        "inner_parity_orbit_positions": np.empty((0, 0), dtype=np.int16),
+        "inner_parity_orbit_lengths": np.empty(0, dtype=np.int16),
+        "inner_parity_goal_local_by_piece": np.empty((0, 0), dtype=np.int16),
+        "inner_parity_move_toggle": np.empty(0, dtype=np.uint8),
         "corner_orientation_count": 0,
     }
 
@@ -223,6 +231,18 @@ def make_cube555_structural_exact_kernel(
         inner_dual_weights_x4=np.ascontiguousarray(
             arrays["inner_dual_weights_x4"], dtype=np.int16
         ),
+        inner_parity_orbit_positions=np.ascontiguousarray(
+            arrays["inner_parity_orbit_positions"], dtype=np.int16
+        ),
+        inner_parity_orbit_lengths=np.ascontiguousarray(
+            arrays["inner_parity_orbit_lengths"], dtype=np.int16
+        ),
+        inner_parity_goal_local_by_piece=np.ascontiguousarray(
+            arrays["inner_parity_goal_local_by_piece"], dtype=np.int16
+        ),
+        inner_parity_move_toggle=np.ascontiguousarray(
+            arrays["inner_parity_move_toggle"], dtype=np.uint8
+        ),
         corner_orientation_count=int(arrays["corner_orientation_count"]),
     )
 
@@ -352,6 +372,44 @@ def _orbit_subset_lower_bound_numba(
     return best
 
 @njit(cache=False)
+def _cube555_inner_parity_numba(
+    state: np.ndarray,
+    inner_parity_orbit_positions: np.ndarray,
+    inner_parity_orbit_lengths: np.ndarray,
+    inner_parity_goal_local_by_piece: np.ndarray,
+) -> int:
+    """Required parity of remaining inner moves for one cube555 state."""
+    if inner_parity_orbit_lengths.shape[0] == 0:
+        return 0
+    max_orbit = inner_parity_orbit_positions.shape[1]
+    permutation = np.empty(max_orbit, dtype=np.int16)
+    seen = np.empty(max_orbit, dtype=np.uint8)
+    required_parity = 0
+    for parity_row in range(inner_parity_orbit_lengths.shape[0]):
+        length = int(inner_parity_orbit_lengths[parity_row])
+        for i in range(length):
+            position = int(inner_parity_orbit_positions[parity_row, i])
+            piece = int(state[position])
+            local_goal = int(inner_parity_goal_local_by_piece[parity_row, piece])
+            if local_goal < 0:
+                return -1
+            permutation[i] = np.int16(local_goal)
+            seen[i] = np.uint8(0)
+
+        cycles = 0
+        for i in range(length):
+            if seen[i] != 0:
+                continue
+            cycles += 1
+            j = i
+            while seen[j] == 0:
+                seen[j] = np.uint8(1)
+                j = int(permutation[j])
+        required_parity ^= (length - cycles) & 1
+    return required_parity
+
+
+@njit(cache=False)
 def _cube555_structural_lower_bound_numba(
     state: np.ndarray,
     corner_dist: np.ndarray,
@@ -364,6 +422,7 @@ def _cube555_structural_lower_bound_numba(
     inner_goal_piece_mask: np.ndarray,
     inner_dual_cut_indices: np.ndarray,
     inner_dual_weights_x4: np.ndarray,
+    required_inner_parity: int,
     corner_orientation_count: int,
 ) -> int:
     # Exact full-corner quotient distance.  Reading one canonical facelet per
@@ -429,6 +488,12 @@ def _cube555_structural_lower_bound_numba(
         if score > best_scaled:
             best_scaled = score
     inner = (best_scaled + 3) // 4
+
+    # The exact-search engine carries this one-bit invariant down the DFS:
+    # inner moves toggle it, outer moves do not.  This avoids recomputing a
+    # 24-position permutation parity at every node.
+    if (inner & 1) != (required_inner_parity & 1):
+        inner += 1
     return corner + inner
 
 
@@ -451,6 +516,7 @@ def lower_bound_numba(
     inner_goal_piece_mask: np.ndarray,
     inner_dual_cut_indices: np.ndarray,
     inner_dual_weights_x4: np.ndarray,
+    required_inner_parity: int,
     corner_orientation_count: int,
 ) -> int:
     if kernel_kind == KERNEL_PANCAKE_GAP:
@@ -477,6 +543,7 @@ def lower_bound_numba(
             inner_goal_piece_mask,
             inner_dual_cut_indices,
             inner_dual_weights_x4,
+            required_inner_parity,
             corner_orientation_count,
         )
     return 32767
@@ -571,6 +638,16 @@ def fill_candidate_moves_numba(
 def exact_kernel_lower_bound(state: np.ndarray, kernel: ExactKernel) -> int:
     """Evaluate one kernel lower bound outside the search loop."""
     state_i16 = _as_int16_c(np.asarray(state))
+    required_inner_parity = 0
+    if int(kernel.kind) == KERNEL_CUBE555_STRUCTURAL:
+        required_inner_parity = _cube555_inner_parity_numba(
+            state_i16,
+            kernel.inner_parity_orbit_positions,
+            kernel.inner_parity_orbit_lengths,
+            kernel.inner_parity_goal_local_by_piece,
+        )
+        if required_inner_parity < 0:
+            return 32767
     return int(
         lower_bound_numba(
             int(kernel.kind),
@@ -590,6 +667,7 @@ def exact_kernel_lower_bound(state: np.ndarray, kernel: ExactKernel) -> int:
             kernel.inner_goal_piece_mask,
             kernel.inner_dual_cut_indices,
             kernel.inner_dual_weights_x4,
+            int(required_inner_parity),
             int(kernel.corner_orientation_count),
         )
     )
