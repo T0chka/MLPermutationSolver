@@ -16,8 +16,12 @@ class XGBoostModel(BaseModel):
         self,
         n_estimators: int = 2000,
         learning_rate: float = 0.07,
-        verbose: bool = False
+        verbose: bool = False,
+        *,
+        objective: str = "reg:squarederror",
     ):
+        if objective not in {"reg:squarederror", "rank:pairwise"}:
+            raise ValueError(f"Unsupported objective: {objective!r}")
         # XGBoost training parameters
         self.num_boost_round = n_estimators
         self.params = {
@@ -25,18 +29,37 @@ class XGBoostModel(BaseModel):
             "device": "cuda",
             "eta": learning_rate,
             "verbosity": 1 if verbose else 0,
-            "objective": "reg:squarederror",
+            "objective": objective,
         }
+        if objective == "rank:pairwise":
+            self.params.update({
+                "lambdarank_pair_method": "mean",
+                "lambdarank_num_pair_per_sample": 1,
+            })
         self.booster = None
 
-    def train(self, X: torch.Tensor, y: torch.Tensor) -> None:
-        """Train on GPU using CuPy + DMatrix."""
+    def train(
+        self,
+        X: torch.Tensor,
+        y: torch.Tensor,
+        *,
+        group: list[int] | None = None,
+    ) -> None:
+        """Train on GPU; pairwise rows must be contiguous by query group.
+
+        group contains query sizes summing to the row count.
+        Larger labels train larger scores, so depth labels preserve lower-is-better search.
+        """
+        if (self.params["objective"] == "rank:pairwise") != (group is not None):
+            raise ValueError("group is required only for rank:pairwise")
         # Convert PyTorch (GPU) to CuPy via DLPack
         X_cupy = cp.from_dlpack(X.contiguous())
         y_cupy = cp.from_dlpack(y.contiguous())
 
         # Build DMatrix for training
         dtrain = xgb.DMatrix(X_cupy, label=y_cupy)
+        if group is not None:
+            dtrain.set_group(group)
 
         # Train XGBoost booster
         self.booster = xgb.train(
