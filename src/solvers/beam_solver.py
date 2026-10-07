@@ -520,6 +520,8 @@ class BeamSolver(BaseSolver):
             "termination_reason": "",
             "backward_archive_states": 0,
             "best_solution_len": -1,
+            "lb_checked": 0,
+            "lb_pruned": 0,
         })
         self._profiler.init_profile()
 
@@ -583,6 +585,12 @@ class BeamSolver(BaseSolver):
         lb = self.adapter.lower_bound(states, direction)
         keep = (new_depth + lb) < path_len_limit
         keep_idx = keep.nonzero(as_tuple=True)[0]
+
+        checked = int(states.size(0))
+        pruned = checked - int(keep_idx.numel())
+
+        self.search_stats["lb_checked"] += checked
+        self.search_stats["lb_pruned"] += pruned
         return (
             states.index_select(0, keep_idx).contiguous(),
             parents.index_select(0, keep_idx),

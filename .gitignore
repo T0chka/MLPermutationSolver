@@ -81,3 +81,5 @@ temp/
 competitions/
 
 # Drafts
+
+/tmp_outputs/
