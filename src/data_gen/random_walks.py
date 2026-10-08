@@ -182,10 +182,14 @@ def random_walks_beam_nbt(
     nbt_depth: int = None,
     dtype: str = 'auto',
     verbose: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    *,
+    return_parents: bool = False,
+) -> tuple[torch.Tensor, ...]:
     """
     Generate non-backtracking random walks from the provided initial state.
     Uses beam search approach where states visited by any trajectory are banned for all.
+    With return_parents, also return predecessor row indices in X (-1 at roots).
+    Repeated states retain their recorded predecessor when expansion stalls.
     """
     if not nbt_depth:
         nbt_depth = n_steps
@@ -219,6 +223,10 @@ def random_walks_beam_nbt(
     # Allocate memory for output
     X = torch.zeros(n_walks * n_steps, state_size, device=device, dtype=dtype)
     y = torch.zeros(n_walks * n_steps, device=device, dtype=torch.uint32)
+    if return_parents:
+        parents = torch.full(
+            (n_walks * n_steps,), -1, device=device, dtype=torch.long,
+        )
     
     # Store initial states in output
     X[:n_walks] = current_states
@@ -254,6 +262,11 @@ def random_walks_beam_nbt(
             tensor_generators.size(1)
         )
         new_states = torch.gather(expanded_states, 2, expanded_moves).flatten(end_dim=1)
+        if return_parents:
+            previous_rows = torch.arange(
+                (step - 1) * n_walks, step * n_walks, device=device,
+            )
+            new_parents = previous_rows.repeat_interleave(n_generators)
         
         # 2. Compute hashes for new states
         new_hashes = torch.sum(new_states * hash_vector, dim=1)
@@ -267,6 +280,8 @@ def random_walks_beam_nbt(
             if new_state_count >= n_walks:
                 # Enough new states available
                 new_states = new_states[is_new_mask]
+                if return_parents:
+                    new_parents = new_parents[is_new_mask]
                 effective_step += 1
                 
                 if verbose and new_state_count > n_walks * 1.5:
@@ -277,6 +292,10 @@ def random_walks_beam_nbt(
                     # Use available new states with repetition
                     repeat_factor = int(np.ceil(n_walks / new_state_count))
                     new_states = new_states[is_new_mask].repeat(repeat_factor, 1)[:n_walks]
+                    if return_parents:
+                        new_parents = new_parents[is_new_mask].repeat(
+                            repeat_factor,
+                        )[:n_walks]
                     effective_step += 1
                     
                     if verbose:
@@ -284,6 +303,8 @@ def random_walks_beam_nbt(
                 else:
                     # No new states available, stay at current states
                     new_states = current_states
+                    if return_parents:
+                        new_parents = parents[previous_rows]
                     
                     if verbose:
                         print(f"  Warning: No new states found, staying at current states")
@@ -295,14 +316,20 @@ def random_walks_beam_nbt(
         if new_states.size(0) > n_walks:
             perm = torch.randperm(new_states.size(0), device=device)
             current_states = new_states[perm][:n_walks]
+            if return_parents:
+                current_parents = new_parents[perm][:n_walks]
         else:
             current_states = new_states
+            if return_parents:
+                current_parents = new_parents
         
         # 5. Store results in output arrays
         start_idx = step * n_walks
         end_idx = (step + 1) * n_walks
         y[start_idx:end_idx] = effective_step
         X[start_idx:end_idx] = current_states
+        if return_parents:
+            parents[start_idx:end_idx] = current_parents
         
         # 6. Update hash history if using non-backtracking
         if nbt_depth > 0:
@@ -312,4 +339,6 @@ def random_walks_beam_nbt(
     if verbose:
         print(f"Random walks completed. Final effective step: {effective_step}")
     
+    if return_parents:
+        return X, y, parents
     return X, y
