@@ -434,6 +434,7 @@ class BeamSolver(BaseSolver):
         verbose: int = 0,
         hashes_batch_size: int = 10_000_000,
         profile_runtime: bool = False,
+        audit_hash_collisions: bool = False,
     ) -> None:
         device = puzzle_spec.solved_state.device
         super().__init__(puzzle_spec, device, model=None, verbose=verbose)
@@ -454,6 +455,11 @@ class BeamSolver(BaseSolver):
         self.bs_nbt_depth = int(bs_nbt_depth)
         self.randomize_ties = bool(randomize_ties)
         self.hashes_batch_size = int(hashes_batch_size)
+        self.audit_hash_collisions = bool(audit_hash_collisions)
+        self._audit_fwd_archive = None
+        self._audit_bwd_archive = None
+        self._prune_layer_depth = None
+        self._prune_direction = ""
         if int(max_steps) <= 0:
             raise ValueError("max_steps must be > 0")
         self.max_steps = int(max_steps)
@@ -522,6 +528,10 @@ class BeamSolver(BaseSolver):
             "best_solution_len": -1,
             "lb_checked": 0,
             "lb_pruned": 0,
+            "first_topk_depth": None,
+            "first_topk_pool": 0,
+            "first_topk_direction": "",
+            "hash_collision_detected": False,
         })
         self._profiler.init_profile()
 
@@ -543,6 +553,15 @@ class BeamSolver(BaseSolver):
         sorted_hashes = hashes[order]
         keep = torch.ones(sorted_hashes.size(0), dtype=torch.bool, device=self.device)
         keep[1:] = sorted_hashes[1:] != sorted_hashes[:-1]
+        if self.audit_hash_collisions and self.search_stats["first_topk_depth"] is None:
+            # A 64-bit hash is not an exact state key. If two unequal states
+            # share one hash, normal beam may discard either; a proof may not.
+            equal_hash_rows = (~keep[1:]).nonzero(as_tuple=True)[0]
+            if equal_hash_rows.numel():
+                left = states.index_select(0, order[equal_hash_rows])
+                right = states.index_select(0, order[equal_hash_rows + 1])
+                if bool((~(left == right).all(dim=1)).any().item()):
+                    self.search_stats["hash_collision_detected"] = True
         keep_idx = order[keep]
         return (
             states.index_select(0, keep_idx).contiguous(),
@@ -562,6 +581,18 @@ class BeamSolver(BaseSolver):
         if hashes.numel() == 0:
             return states, parents, moves, hashes
         seen = history.check(hashes)
+        if (
+            self.audit_hash_collisions
+            and self.search_stats["first_topk_depth"] is None
+            and bool(seen.any().item())
+        ):
+            archive = (
+                self._audit_fwd_archive
+                if history is self.fwd_history else self._audit_bwd_archive
+            )
+            if archive is None:
+                raise RuntimeError("Hash-collision audit archive unavailable")
+            self._audit_history_matches(states, hashes, seen, archive)
         keep = (~seen).nonzero(as_tuple=True)[0]
         return (
             states.index_select(0, keep).contiguous(),
@@ -569,6 +600,63 @@ class BeamSolver(BaseSolver):
             moves.index_select(0, keep),
             hashes.index_select(0, keep),
         )
+
+    def _audit_history_matches(
+        self,
+        states: torch.Tensor,
+        hashes: torch.Tensor,
+        seen: torch.Tensor,
+        archive: LayerArchive,
+    ) -> None:
+        """Fail closed if history hash pruning removed a genuinely new state.
+
+        Archives already hold all earlier retained layers. Comparing against
+        the superset of all archived layers is conservative: a true match in
+        any earlier layer is safe to remove, even if that layer was evicted
+        from HashHistory's shorter NBT window.
+
+        This extra check runs only when explicitly requested by a production
+        LB-certification caller; ordinary beam remains unchanged.
+        """
+        indices = seen.nonzero(as_tuple=True)[0]
+        # Cache one sorted hash index per archived layer, not a second state copy.
+        indices_by_layer = []
+        for previous in archive.states_by_depth:
+            if previous.numel() == 0:
+                continue
+            previous_hashes = self._compute_state_hashes(previous)
+            sorted_hashes, order = torch.sort(previous_hashes)
+            indices_by_layer.append((previous, sorted_hashes, order))
+
+        for start in range(0, int(indices.numel()), 16384):
+            rows = indices[start:start + 16384]
+            candidate_hashes = hashes.index_select(0, rows)
+            candidate_states = states.index_select(0, rows)
+            exact_match = torch.zeros(
+                rows.numel(), device=self.device, dtype=torch.bool
+            )
+            for previous, sorted_hashes, order in indices_by_layer:
+                pos = torch.searchsorted(sorted_hashes, candidate_hashes)
+                valid = pos < int(sorted_hashes.numel())
+                safe_pos = pos.clamp(max=int(sorted_hashes.numel()) - 1)
+                hits = valid & (
+                    sorted_hashes.index_select(0, safe_pos) == candidate_hashes
+                )
+                if bool(hits.any().item()):
+                    hit_rows = hits.nonzero(as_tuple=True)[0]
+                    previous_rows = order.index_select(
+                        0, safe_pos.index_select(0, hit_rows)
+                    )
+                    same = (
+                        candidate_states.index_select(0, hit_rows)
+                        == previous.index_select(0, previous_rows)
+                    ).all(dim=1)
+                    exact_match[hit_rows] |= same
+                if bool(exact_match.all().item()):
+                    break
+            if bool((~exact_match).any().item()):
+                self.search_stats["hash_collision_detected"] = True
+                return
 
     def _prune_by_lower_bound(
         self,
@@ -608,6 +696,10 @@ class BeamSolver(BaseSolver):
         n = int(states.size(0))
         if n <= self.beam_width:
             return states, parents, moves, hashes
+        if self.search_stats["first_topk_depth"] is None:
+            self.search_stats["first_topk_depth"] = self._prune_layer_depth
+            self.search_stats["first_topk_pool"] = n
+            self.search_stats["first_topk_direction"] = self._prune_direction
         if self.model is None:
             scores = torch.zeros(n, dtype=torch.float32, device=self.device)
         else:
@@ -715,6 +807,7 @@ class BeamSolver(BaseSolver):
         self.adapter.prepare_search(start_state)
 
         fwd_archive = LayerArchive(start_state)
+        self._audit_fwd_archive = fwd_archive if self.audit_hash_collisions else None
         fwd_meet = MeetArchive(device=self.device)
         fwd_lookup = MeetLookup(fwd_meet)
         start_hash = self._compute_state_hashes(start_state.unsqueeze(0))
@@ -745,6 +838,7 @@ class BeamSolver(BaseSolver):
             bwd_meet.add_layer_hashes(solved_hash, depth=0)
             self.bwd_history.add(solved_hash)
 
+        self._audit_bwd_archive = bwd_archive if self.audit_hash_collisions else None
         fwd_exhausted = False
         bwd_exhausted = False
 
@@ -782,6 +876,8 @@ class BeamSolver(BaseSolver):
                             children, parents, moves, hashes,
                             new_depth, "forward", path_len_limit,
                         )
+                    self._prune_layer_depth = new_depth
+                    self._prune_direction = "forward"
                     with self._profiler.section("beam_prune", get_states=lambda: int(children.size(0))):
                         children, parents, moves, hashes = self._prune_frontier(children, parents, moves, hashes)
 
@@ -836,6 +932,8 @@ class BeamSolver(BaseSolver):
                             children, parents, moves, hashes,
                             new_depth, "backward", path_len_limit,
                         )
+                    self._prune_layer_depth = new_depth
+                    self._prune_direction = "backward"
                     with self._profiler.section("beam_prune", get_states=lambda: int(children.size(0))):
                         children, parents, moves, hashes = self._prune_frontier(children, parents, moves, hashes)
                     
